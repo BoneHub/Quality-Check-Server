@@ -735,14 +735,16 @@ segmentations. A reviewer:
    hides it; the target shows it alone. **Outline**, **Distinct colours**, a CT window and a
    single-plane view help with details;
 4. gives each label a verdict: ✓ accepts it, ✗ rejects it with a reason (*needs correction* or
-   *should not be there*). Every label starts accepted. **A bone the segmentation lacks**
+   *should not be there*). Every label starts without a verdict, and every label under
+   review needs one before the verdict can be sent. **A bone the segmentation lacks**
    reports a missing bone. A comment explains what is wrong;
 5. presses **Accept** (or **Send to editors**, when something is rejected or missing),
    **Reject subject** (rejects every label under review), or **Release** (hands it back; the
    reviewer is offered it again only once nothing else is waiting for them).
 
 Labels the reviewer did not judge wait for another reviewer. A segmentation that is not on
-its image's voxel grid starts with its labels rejected, so that an editor fixes it.
+its image's voxel grid cannot be accepted: its labels can only be rejected, so that an editor
+fixes it.
 
 **Large scans.** Very large CTs are shown at reduced resolution: at most 256 million voxels in
 the slices. For example, 0.6 mm slices are shown at 1.2 mm. The page says so, and notes it in

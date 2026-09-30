@@ -1315,17 +1315,7 @@ async function openSubject(handout) {
   state.verdicts = new Map();
   state.reasons = new Map();
   state.missing = new Set();
-  // Every label under review starts accepted, and the reviewer rejects what is wrong -- but a
-  // segmentation that cannot be accepted as it is starts rejected, and one not sent unjudged.
-  for (const label of state.labels.values()) {
-    if (label.state !== "pending") continue;
-    if (label.painted && handout.stored_segmentation_issue) {
-      state.verdicts.set(label.name, "reject");
-      state.reasons.set(label.name, "quality");
-    } else if (!label.painted || handout.has_segmentation) {
-      state.verdicts.set(label.name, "accept");
-    }
-  }
+  // Every label starts without a verdict: the reviewer accepts or rejects each one under review.
   $("comment").value = "";
   $("missingInput").value = "";
   $("verdictMessage").replaceChildren();
@@ -1410,7 +1400,7 @@ function renderSubject() {
   } else if (handout.stored_segmentation_issue) {
     notes.push(
       `This segmentation cannot be accepted as it is. ${handout.stored_segmentation_issue} ` +
-        "Its labels start rejected, so that an editor rewrites it on the image's grid in 3D Slicer.",
+        "Reject its labels, so that an editor rewrites it on the image's grid in 3D Slicer.",
     );
   }
   $("subjectNotes").replaceChildren(...notes.map((text) => banner(text, "note")));
