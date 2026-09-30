@@ -35,6 +35,11 @@ one that does not leaves it. A label the upload takes away is removed; unless a 
 asked for that ('absent'), a reviewer must agree first, when edits need review. A label
 nobody has reviewed stays ``pending`` until a reviewer has: an editor's word is not a review.
 
+The administrator may approve a case at any stage, not only once it waits for approval: the
+labels a reviewer accepted then become reviewed, and the labels nobody accepted keep the
+status the dataset gives them. An approval may add a remark to the subject's remarks in
+Subject_info, tagged ``QC: `` so that it can be told apart from the converters' remarks.
+
 Everything here works on the case alone; the store reads and writes the files.
 """
 
@@ -62,6 +67,12 @@ STAGE_OF_ROLE: dict[str, str] = {REVIEWER: REVIEW, EDITOR: EDIT}
 
 #: Who acts for the administrator in a case's history.
 ADMIN = "admin"
+
+#: What begins a remark an approval adds to Subject_info, to tell it from the converters' remarks.
+REMARK_TAG = "QC:"
+
+#: What separates the remarks of one subject in Subject_info.
+REMARK_SEPARATOR = "; "
 
 
 # ----------------------------------------------------------------------- queries
@@ -280,17 +291,29 @@ def close(case: Case, comment: str | None, now: str, by: str = ADMIN) -> dict:
     return {}
 
 
-def mark_applied(case: Case, updated_labels: dict[str, int], backup_path: str | None, now: str, by: str = ADMIN) -> dict:
-    """The case was approved and written into the dataset."""
+def mark_applied(
+    case: Case,
+    updated_labels: dict[str, int],
+    backup_path: str | None,
+    now: str,
+    by: str = ADMIN,
+    remark: str | None = None,
+    remark_added: bool = False,
+) -> dict:
+    """The case was approved and written into the dataset, with the ``remark`` asked for as its
+    comment: added to the subject's remarks, or found there already."""
     details = {
         "updated_labels": dict(sorted(updated_labels.items())),
         "segmentation_written": case.staged,
         "backup_path": backup_path,
+        "not_accepted": labels_in(case, PENDING, REJECTED),
+        "remark": remark,
+        "remark_added": remark_added,
     }
     case.applied_at = now
     case.backup_path = backup_path
     case.staged = False
-    _step(case, by, ADMIN, "approve", APPLIED, None, None, now, details)
+    _step(case, by, ADMIN, "approve", APPLIED, remark, None, now, details)
     return details
 
 
@@ -301,7 +324,8 @@ def approval_statuses(case: Case, statuses: dict[str, int], mark_removed_absent:
     An accepted label becomes reviewed (2). One no longer painted becomes not available (0)
     when the policy says so, if it was available. A label in the segmentation that the dataset
     lists as not available is recorded as available but not reviewed (1): the file is the truth
-    about what is painted.
+    about what is painted. Any other label -- one nobody accepted, in a case approved before it
+    waited for approval -- keeps its status.
     """
     updates: dict[str, int] = {}
     for name, label in case.labels.items():
@@ -314,6 +338,31 @@ def approval_statuses(case: Case, statuses: dict[str, int], mark_removed_absent:
         elif current == STATUS_NOT_AVAILABLE:
             updates[name] = STATUS_NOT_REVIEWED
     return dict(sorted(updates.items()))
+
+
+def tagged_remark(text: str | None) -> str | None:
+    """The administrator's remark as Subject_info records it, ``QC: <text>`` on one line, or
+    None when there is none. A tag typed in already is not doubled."""
+    text = " ".join((text or "").split())
+    if text[: len(REMARK_TAG)].casefold() == REMARK_TAG.casefold():
+        text = text[len(REMARK_TAG) :].strip()
+    return f"{REMARK_TAG} {text}" if text else None
+
+
+def with_remark(remarks: str | None, remark: str) -> str | None:
+    """A subject's ``remarks`` with ``remark`` added at the end, or None when one of them says
+    so already, ignoring case and spacing. The remarks before it are never changed."""
+    remarks = (remarks or "").strip()
+    if not remarks:
+        return remark
+    if _remark_parts(remark) in _remark_parts(remarks):
+        return None
+    return f"{remarks}{REMARK_SEPARATOR}{remark}"
+
+
+def _remark_parts(remarks: str) -> str:
+    """Remarks as ``;one;two;``, in lower case with single spaces, to find one among others."""
+    return ";" + ";".join(" ".join(part.split()) for part in remarks.split(";")).casefold() + ";"
 
 
 # ---------------------------------------------------------------------- helpers

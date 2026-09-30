@@ -154,6 +154,11 @@ class PageContractTests(unittest.TestCase):
         for endpoint in ('"/admin/api/cases/approve"', '"/approve"', '"/return"', '"/close"', '"/segmentation"'):
             self.assertIn(endpoint, page)
 
+    def test_the_admin_panel_filters_and_approves_with_the_names_the_server_reads(self):
+        page = self.read("admin.html")
+        for name in ('"&comment="', "subject_keys:", "remark:", "allow_unaccepted:", "revisions:"):
+            self.assertIn(name, page)
+
 
 class SegmentTableTests(QCTestCase):
     """What the review page is told about a stored segmentation: read from its header alone."""

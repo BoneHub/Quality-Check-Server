@@ -21,6 +21,7 @@
       --warn: #8a6100;
       --code-bg: #f0f2f5;
       --logo-bg: transparent;
+      --mark: #fbe9a0;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -38,6 +39,7 @@
         --code-bg: #262a30;
         /* the logo is navy on a transparent ground: give it a light tile */
         --logo-bg: #f6f7f9;
+        --mark: #5e4d12;
       }
     }
 
@@ -371,6 +373,22 @@
       font-style: italic;
     }
 
+    mark {
+      background: var(--mark);
+      color: var(--text);
+      border-radius: 2px;
+    }
+
+    th.tick,
+    td.tick {
+      width: 1%;
+      padding-right: 0;
+    }
+
+    .match+.match {
+      margin-top: 6px;
+    }
+
     #login {
       max-width: 420px;
       margin: 60px auto;
@@ -439,7 +457,8 @@
         <p class="muted" style="margin-top:0">
           Reviewers' and editors' verdicts wait here. Nothing is written into the dataset until you approve a
           subject: its accepted labels then become reviewed (status 2) in <code>Subject_info</code>, and an editor's
-          correction replaces the dataset's segmentation, which is backed up first.
+          correction replaces the dataset's segmentation, which is backed up first. Tick subjects to approve several
+          at once, with a remark for their <code>Subject_info</code> if you like.
         </p>
         <div class="row" style="margin-bottom:12px">
           <div style="flex:0 0 auto">
@@ -454,25 +473,34 @@
               <option value="">all</option>
             </select>
           </div>
+          <div style="flex:0 1 260px">
+            <label for="commentFilter">Comments containing</label>
+            <input id="commentFilter" type="search" placeholder="hip implant" autocomplete="off" style="width:100%"
+              title="Any comment in the subject's history, by a reviewer, an editor or you; case is ignored">
+          </div>
           <div></div>
-          <button class="primary" id="approveAllBtn" title="Approve every subject waiting for approval">Approve all
-            waiting</button>
+          <button class="primary" id="approveTickedBtn" disabled
+            title="Approve the ticked subjects, with a remark for their Subject_info if you like">Approve
+            ticked…</button>
         </div>
         <div class="scroll">
           <table>
             <thead>
               <tr>
+                <th class="tick"><input type="checkbox" id="tickAll" disabled aria-label="Tick every subject listed"
+                    title="Tick every subject listed"></th>
                 <th>Subject</th>
                 <th>Stage</th>
                 <th>Labels</th>
                 <th>Segmentation</th>
-                <th>Latest</th>
+                <th id="latestHead">Latest</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="casesBody"></tbody>
           </table>
         </div>
+        <p class="muted" id="casesNote" hidden style="margin:8px 0 0"></p>
       </section>
 
       <section>
@@ -646,9 +674,11 @@
       "use strict";
 
       var KEY_STORAGE = "bonehub_qc_admin_key";
+      var CASES_LIMIT = 300;  // subjects listed under Approvals at most, the most recently changed
       var adminKey = null;
       var config = {};
       var usersByName = {};  // as last listed, for the roles of a user whose key is rotated
+      var listedCases = {};  // subject key -> case as last listed, for the stage and revision of a ticked one
 
       // What a user may do (User.roles on the server), and where each role works.
       var ROLE_OPTIONS = [
@@ -830,15 +860,20 @@
         return "<details><summary>" + esc(summary || "no labels") + "</summary><ul>" + items.join("") + "</ul></details>" + approval;
       }
 
-      function lastEventCell(c) {
-        var events = c.events || [];
-        if (!events.length) { return '<span class="muted">—</span>'; }
-        var e = events[events.length - 1];
+      // A step of a subject's history, in words: "rita reviewed".
+      function stepText(e) {
         var what = {
           review: "reviewed", edit: "corrected", escalate: "sent it to you", approve: "approved",
           "return": "sent it back", close: "closed"
         }[e.action] || e.action;
-        return '<div class="nowrap muted">' + esc(shortTime(e.at)) + "</div><div>" + esc(e.by) + " " + esc(what) + "</div>" +
+        return e.by + " " + what;
+      }
+
+      function lastEventCell(c) {
+        var events = c.events || [];
+        if (!events.length) { return '<span class="muted">—</span>'; }
+        var e = events[events.length - 1];
+        return '<div class="nowrap muted">' + esc(shortTime(e.at)) + "</div><div>" + esc(stepText(e)) + "</div>" +
           (e.comment ? '<div class="quote">“' + esc(e.comment) + "”</div>" : "");
       }
 
@@ -858,29 +893,94 @@
         return '<div class="actions">' + buttons.join("") + "</div>";
       }
 
+      // The comments that matched the filter, each with who wrote it and when.
+      function matchesCell(c, needle) {
+        return (c.matches || []).map(function (e) {
+          return '<div class="match"><div class="nowrap muted">' + esc(shortTime(e.at)) + " · " + esc(stepText(e)) +
+            '</div><div class="quote">“' + highlight(e.comment, needle) + "”</div></div>";
+        }).join("");
+      }
+
+      // The text, escaped, with the needle marked wherever it occurs, whatever its case.
+      function highlight(text, needle) {
+        text = String(text || "");
+        var lower = text.toLowerCase();
+        var find = needle.replace(/\s+/g, " ").toLowerCase();
+        if (!find || lower.length !== text.length) { return esc(text); }
+        var out = "";
+        var from = 0;
+        var at;
+        while ((at = lower.indexOf(find, from)) !== -1) {
+          out += esc(text.slice(from, at)) + "<mark>" + esc(text.slice(at, at + find.length)) + "</mark>";
+          from = at + find.length;
+        }
+        return out + esc(text.slice(from));
+      }
+
+      // A subject can be ticked when nobody holds it and it is not approved already.
+      function tickable(c) { return c.stage !== "applied" && !c.leased_to; }
+
+      // A tick outlives a new list only while its subject is in it, unchanged since it was ticked.
       function renderCases(cases) {
         var stage = $("stageFilter").value;
+        var needle = $("commentFilter").value.trim();
+        var ticked = {};
+        tickBoxes().forEach(function (box) {
+          var key = box.getAttribute("data-tick");
+          if (box.checked && listedCases[key]) { ticked[key] = listedCases[key].revision; }
+        });
+        listedCases = {};
+        cases.forEach(function (c) { listedCases[c.subject_key] = c; });
+        $("latestHead").textContent = needle ? "Matching comments" : "Latest";
+        $("casesNote").textContent = "Only the " + CASES_LIMIT + " most recently changed subjects are listed. " +
+          "Narrow the list to see the others.";
+        $("casesNote").hidden = cases.length < CASES_LIMIT;
         if (!cases.length) {
-          $("casesBody").innerHTML = '<tr><td colspan="6" class="muted">' +
-            (stage === "approval" ? "Nothing waits for your approval." : "Nothing here.") + "</td></tr>";
+          $("casesBody").innerHTML = '<tr><td colspan="7" class="muted">' +
+            (needle ? "No comment here contains “" + esc(needle) + "”."
+              : stage === "approval" ? "Nothing waits for your approval." : "Nothing here.") + "</td></tr>";
+          updateTicks();
           return;
         }
         $("casesBody").innerHTML = cases.map(function (c) {
+          var key = esc(c.subject_key);
           var approval = (c.events || []).filter(function (e) { return e.action === "approve"; }).pop();
           var segmentation = c.staged ? "correction by " + esc(c.edited_by)
             : approval && approval.details.segmentation_written ? "correction by " + esc(c.edited_by) + ", written into the dataset"
               : c.base ? "the dataset's own" : "none";
           var download = (c.staged || c.base) && c.stage !== "applied"
-            ? ' <button class="small" data-act="download" data-key="' + esc(c.subject_key) + '" title="Download it, to look at in 3D Slicer">Download</button>'
+            ? ' <button class="small" data-act="download" data-key="' + key + '" title="Download it, to look at in 3D Slicer">Download</button>'
             : "";
+          var tick = tickable(c) ? '<input type="checkbox" data-tick="' + key + '" aria-label="Tick ' + key + '">' : "";
           return "<tr>" +
-            '<td class="mono nowrap">' + esc(c.subject_key) + "</td>" +
+            '<td class="tick">' + tick + "</td>" +
+            '<td class="mono nowrap">' + key + "</td>" +
             '<td><span class="pill ' + esc(c.stage) + '">' + esc(STAGE_TEXT[c.stage] || c.stage) + "</span></td>" +
             "<td>" + labelsCell(c) + "</td>" +
             "<td>" + segmentation + download + "</td>" +
-            "<td>" + lastEventCell(c) + "</td>" +
+            "<td>" + (needle ? matchesCell(c, needle) : lastEventCell(c)) + "</td>" +
             '<td class="right">' + caseActions(c) + "</td></tr>";
         }).join("");
+        tickBoxes().forEach(function (box) {
+          var key = box.getAttribute("data-tick");
+          box.checked = ticked[key] === listedCases[key].revision;
+        });
+        updateTicks();
+      }
+
+      function tickBoxes() {
+        return Array.prototype.slice.call($("casesBody").querySelectorAll("input[data-tick]"));
+      }
+
+      // The tick-all box and the Approve button follow the ticks.
+      function updateTicks() {
+        var boxes = tickBoxes();
+        var ticked = boxes.filter(function (box) { return box.checked; }).length;
+        $("tickAll").disabled = !boxes.length;
+        $("tickAll").checked = boxes.length > 0 && ticked === boxes.length;
+        $("tickAll").indeterminate = ticked > 0 && ticked < boxes.length;
+        $("approveTickedBtn").disabled = !ticked;
+        $("approveTickedBtn").textContent = ticked ? "Approve " + ticked + " ticked…" : "Approve ticked…";
       }
 
       function accessSelect(user) {
@@ -989,7 +1089,9 @@
               " → " + (STAGE_TEXT[e.stage] || e.stage);
             if (e.comment) { detail += " — " + e.comment; }
           } else if (e.kind === "approved") {
-            detail = "written into the dataset" + (e.segmentation_written ? ", with the correction" : "");
+            detail = "written into the dataset" + (e.segmentation_written ? ", with the correction" : "") +
+              ((e.not_accepted || []).length ? "; not accepted, left as they were: " + names(e.not_accepted) : "") +
+              (e.remark ? (e.remark_added ? "; remark added: " : "; remark there already: ") + e.remark : "");
           } else if (e.kind === "returned") {
             detail = "sent back to the " + (e.to === "edit" ? "editors" : "reviewers") + (e.comment ? " — " + e.comment : "");
           } else if (e.kind === "closed") {
@@ -1025,6 +1127,18 @@
 
       // --- data loading ---------------------------------------------------------
       var refreshes = 0;
+      var caseLoads = 0;
+
+      // The subjects under Approvals, as the filters above them say. Only the latest load is drawn:
+      // one answered late would otherwise show the list of a filter no longer set, and its ticks.
+      function loadCases() {
+        var load = ++caseLoads;
+        var stage = $("stageFilter").value;
+        var needle = $("commentFilter").value.trim();
+        return api("GET", "/admin/api/cases?limit=" + CASES_LIMIT + (stage ? "&stage=" + stage : "") +
+          (needle ? "&comment=" + encodeURIComponent(needle) : ""))
+          .then(function (cases) { if (load === caseLoads) { renderCases(cases); } });
+      }
 
       // Everything is fetched again after each action. Only the latest refresh is drawn: an earlier
       // one answered late would otherwise show a subject where it no longer is.
@@ -1034,10 +1148,9 @@
           return function (data) { if (refresh === refreshes) { render(data); } };
         };
         var state = $("stateFilter").value;
-        var stage = $("stageFilter").value;
         return Promise.all([
           api("GET", "/admin/api/stats").then(latest(renderStats)),
-          api("GET", "/admin/api/cases?limit=300" + (stage ? "&stage=" + stage : "")).then(latest(renderCases)),
+          loadCases(),
           api("GET", "/admin/api/users").then(latest(renderUsers)),
           api("GET", "/admin/api/assignments?limit=100" + (state ? "&state=" + state : "")).then(latest(renderAssignments)),
           api("GET", "/admin/api/submissions?limit=50").then(latest(renderLog))
@@ -1049,22 +1162,74 @@
       $("stateFilter").addEventListener("change", refreshAll);
       $("stageFilter").addEventListener("change", refreshAll);
 
+      // The list follows the comment filter as it is typed, once the typing pauses.
+      var commentTimer = null;
+      function filterByComment() {
+        window.clearTimeout(commentTimer);
+        loadCases()["catch"](function (err) { showError(err.message); });
+      }
+      $("commentFilter").addEventListener("input", function () {
+        window.clearTimeout(commentTimer);
+        commentTimer = window.setTimeout(filterByComment, 300);
+      });
+      $("commentFilter").addEventListener("keydown", function (event) {
+        if (event.key === "Enter") { filterByComment(); }
+      });
+
       $("reindexBtn").addEventListener("click", function () {
         api("POST", "/admin/api/refresh-index", {})
           .then(renderStats)["catch"](function (err) { showError(err.message); });
       });
 
-      $("approveAllBtn").addEventListener("click", function () {
-        if (!window.confirm("Approve every subject waiting for approval? Their accepted labels and corrected " +
-          "segmentations are written into the dataset.")) { return; }
-        api("POST", "/admin/api/cases/approve", {}).then(function (body) {
+      $("tickAll").addEventListener("change", function () {
+        var on = $("tickAll").checked;
+        tickBoxes().forEach(function (box) { box.checked = on; });
+        updateTicks();
+      });
+
+      $("casesBody").addEventListener("change", function (event) {
+        if (event.target.hasAttribute("data-tick")) { updateTicks(); }
+      });
+
+      // A few subject keys for a dialog, and how many more there are.
+      function someKeys(keys) {
+        return keys.slice(0, 8).join(", ") + (keys.length > 8 ? " and " + (keys.length - 8) + " more" : "");
+      }
+
+      // Each ticked subject is approved only as it was listed: one that changed since is left out
+      // and reported, and so is one that is not waiting for approval unless the dialog said so.
+      $("approveTickedBtn").addEventListener("click", function () {
+        var keys = tickBoxes().filter(function (box) { return box.checked; })
+          .map(function (box) { return box.getAttribute("data-tick"); });
+        if (!keys.length) { return; }
+        var early = keys.filter(function (key) { return listedCases[key].stage !== "approval"; });
+        var lines = ["Approve " + keys.length + " subject(s)? Their accepted labels become reviewed (2) in " +
+          "Subject_info, and editors' corrections replace the dataset's segmentations."];
+        if (early.length) {
+          lines.push("", early.length + " of them do not wait for approval: " + someKeys(early) + ". Only the " +
+            "labels a reviewer accepted become 2; the labels nobody accepted keep their status.");
+        }
+        lines.push("", "Remark to add to their Subject_info, as “QC: …” (optional):");
+        var remark = window.prompt(lines.join("\n"), "");
+        if (remark === null) { return; }
+        var revisions = {};
+        keys.forEach(function (key) { revisions[key] = listedCases[key].revision; });
+        $("approveTickedBtn").disabled = true;
+        api("POST", "/admin/api/cases/approve", {
+          subject_keys: keys,
+          remark: remark,
+          allow_unaccepted: early.length > 0,
+          revisions: revisions
+        }).then(function (body) {
           var failed = body.results.filter(function (r) { return !r.approved; });
           if (failed.length) {
             showError(failed.length + " not approved: " + failed.map(function (r) { return r.subject_key + " (" + r.message + ")"; }).join("; "));
           }
-          showOk(body.approved + " subject(s) approved and written into the dataset.");
+          var had = body.results.filter(function (r) { return r.approved && !r.remark_added; }).length;
+          showOk(body.approved + " subject(s) approved and written into the dataset." +
+            (remark.trim() && had ? " " + had + " of them had that remark already." : ""));
           return refreshAll();
-        })["catch"](function (err) { showError(err.message); });
+        })["catch"](function (err) { showError(err.message); return refreshAll(); });
       });
 
       // A subject's segmentation, fetched with the admin key and handed to the browser as a file.

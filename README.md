@@ -220,6 +220,12 @@ This is where you decide. The **Showing** menu picks what to list:
 | closed | you closed |
 | all | are in any of the above |
 
+**Comments containing** narrows the list to subjects with a comment that contains what you
+type, for example `hip implant`. It searches every comment in the subject's history, by
+reviewers, editors and you, and ignores upper and lower case. The list then shows the
+matching comments, with the words found marked, so you can spot one that only looks like a
+match, such as "no implant".
+
 Each row shows:
 
 - **Stage**: where the subject is.
@@ -229,21 +235,32 @@ Each row shows:
   "On approval: 3 set to 2".
 - **Segmentation**: "the dataset's own" or "correction by eddie". **Download** saves it as a
   `.seg.nrrd` file, to open in 3D Slicer.
-- **Latest**: the last step, who took it, and their comment.
+- **Latest**: the last step, who took it, and their comment. While you filter by comment,
+  this column shows the matching comments instead.
 
 The buttons:
 
 | Button | What it does |
 | --- | --- |
 | **Approve** | Writes this subject into the dataset. Only for subjects waiting for approval |
-| **Approve all waiting** | Approves every subject waiting for approval, and lists any it could not approve, with the reason |
+| **Approve ticked…** | Approves the subjects you ticked, after asking for an optional remark to add to their `Subject_info` (see [Remarks](#remarks)). Lists any it could not approve, with the reason |
 | **To reviewers** | Sends the subject back to the reviewers: every verdict is reviewed again. You can add a comment |
 | **To editors** | Sends the subject to an editor with your comment, for example what to fix |
 | **Close** | Ends the quality check of this subject without writing anything. It is not handed out again unless you press To reviewers or To editors, which reopen it |
 
-While someone is working on a subject, its buttons are replaced by "with *name*". To act on it
-anyway, release it first under **Assignments**. An approved subject has no buttons: it is
-finished.
+The box in the header row ticks every subject listed. **Approve ticked…** approves only what you
+ticked, never more, and each subject only as it was listed: one that changed since, because
+somebody gave a verdict on it or took it, is left out and reported. Refresh and look again.
+
+You can also tick a subject that does **not** wait for approval: one a reviewer rejected, one
+an editor sent you, one waiting for a reviewer, or one you closed. The dialog says so first.
+Approving it sets only the labels a reviewer accepted to `2`. The labels nobody accepted keep
+the status they have in `Subject_info`, normally `1`, so they stay marked as not reviewed. An
+editor's correction waiting on the server is written into the dataset all the same.
+
+While someone is working on a subject, its buttons and its tick box are replaced by "with
+*name*". To act on it anyway, release it first under **Assignments**. An approved subject has
+no buttons: it is finished.
 
 ### Create user and Users
 
@@ -299,7 +316,24 @@ in `.env` comes back at the next restart.
 
 **Approve finished subjects.** Under **Approvals**, show *waiting for approval*. Open the
 **Labels** summary to see who accepted what. If you want to look yourself, **Download** the
-segmentation and open it in 3D Slicer. Then press **Approve**, or **Approve all waiting**.
+segmentation and open it in 3D Slicer. Then press **Approve**, or tick the subjects (the box
+in the header ticks them all) and press **Approve ticked…**.
+
+**Record a finding, such as an implant, in `Subject_info`.** Ask the reviewers to judge each
+bone as usual, and to write the finding in their comment, always in the same words, for
+example "hip implant". Do not have them reject the subject for it: that sends it to the
+editors, who have nothing to correct. Then, before you approve anything else:
+
+1. Under **Approvals**, show *waiting for approval* and type `hip implant` in **Comments
+   containing**.
+2. Read the matching comments, and tick the subjects they really describe.
+3. Press **Approve ticked…** and type the remark, for example `Hip implant`. Each ticked subject's
+   `remarks` in `Subject_info` gets `QC: Hip implant` (see [Remarks](#remarks)).
+
+Approve these subjects first. **Approve** and **Approve ticked…** without a remark write none,
+and an approved subject cannot be given one afterwards, except by editing `Subject_info` by
+hand. Show *all* to find subjects with the finding at other stages, for example one a
+reviewer rejected for it before you gave these instructions.
 
 **Deal with an escalated subject.** Show *sent to you by an editor* and read the editor's
 comment under **Latest**. Then:
@@ -511,17 +545,46 @@ Approving a subject:
    all, to `1`, unless it was accepted;
 4. **replaces the dataset's segmentation with the editor's correction**, if there is one. The
    old segmentation is backed up into the server's `backups/` folder first;
-5. adds a line to **`Dataset_XXX_qualitycheck.log`** next to the dataset, saying who accepted and
-   who corrected each label.
+5. adds **your remark**, if you gave one, to the subject's `remarks` in `Subject_info`;
+6. adds a line to **`Dataset_XXX_qualitycheck.log`** next to the dataset, saying who accepted and
+   who corrected each label, and which remark was added.
 
-Labels that were not under review keep their status.
+Labels that were not under review keep their status. So do labels nobody accepted, when you
+approve a subject that did not wait for approval: an approval never marks a label reviewed
+that no reviewer accepted.
+
+### Remarks
+
+A remark you give when approving is added to the end of the subject's `remarks` in
+`Subject_info`, tagged `QC:` so that it can be told apart from the remarks the converters
+wrote:
+
+| `remarks` before | After approving with the remark `Hip implant` |
+| --- | --- |
+| *(none)* | `QC: Hip implant` |
+| `Metal artifact present` | `Metal artifact present; QC: Hip implant` |
+| `Metal artifact present; QC: Hip implant` | unchanged: the remark is there already |
+
+- What is there already is never changed or removed.
+- A remark is added once. One that is there already, whatever its upper and lower case, is
+  not added again, and the approval goes ahead.
+- A remark is one line, at most 500 characters. Typing `QC:` yourself does not double the
+  tag.
+- The remark is written in the same write as the label statuses, so an approval that fails
+  writes neither. It is kept with the subject's history, where **Comments containing** finds it
+  too.
+- Nothing undoes a remark. Correct a wrong one by hand in `Subject_info_XXX.json`.
+- People will find subjects by searching `remarks` as text, so use the same words for the same
+  finding every time.
 
 Approval is **refused** when:
 
 - the dataset's segmentation changed after the subject's quality check began, because another
   tool or another server wrote it. Approving would overwrite that change. Send the subject
   back to review instead;
-- the dataset was regenerated under another schema version.
+- the dataset was regenerated under another schema version;
+- someone holds the subject right now, or, with **Approve ticked…**, it changed after you listed
+  it.
 
 If `Subject_info` cannot be written, the old segmentation is put back. A subject is never left
 half approved.
@@ -737,7 +800,8 @@ segmentations. A reviewer:
 4. gives each label a verdict: ✓ accepts it, ✗ rejects it with a reason (*needs correction* or
    *should not be there*). Every label starts without a verdict, and every label under
    review needs one before the verdict can be sent. **A bone the segmentation lacks**
-   reports a missing bone. A comment explains what is wrong;
+   reports a missing bone. A comment explains what is wrong, and records anything else worth
+   knowing, such as an implant: you can find subjects by what their comments say;
 5. presses **Accept** (or **Send to editors**, when something is rejected or missing),
    **Reject subject** (rejects every label under review), or **Release** (hands it back; the
    reviewer is offered it again only once nothing else is waiting for them).
@@ -805,7 +869,7 @@ segmentation paints it while `Subject_info` lists it as not available, or not at
 | `/docs` | Interactive OpenAPI documentation |
 | `/health` | Unauthenticated liveness probe |
 | `/api/v1/...` | Client API, authenticated with `X-API-Key`, in the role named by `X-Client-Role` |
-| `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals |
+| `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals. `cases?comment=` finds subjects by their comments, and `POST cases/approve` takes `subject_keys`, a `remark`, `allow_unaccepted` and the `revisions` the subjects were listed at |
 | `/static/...` | The pages' scripts and the vendored NiiVue viewer |
 
 ### Client flow
@@ -908,7 +972,7 @@ To run one module or one test, replace the last command, for example with
 | Module | What it covers |
 | --- | --- |
 | `test_workflow.py` | The stages: reviewers first, per-label verdicts and missing bones, editors' corrections compared voxel by voxel, removals, review after correction or not, nobody reviewing their own correction, leases per role, late verdicts |
-| `test_approval.py` | What approving writes into the dataset, and nothing before it; refusals, backups and the undoing of a failed write; approving all; sending back and closing; the admin API for it |
+| `test_approval.py` | What approving writes into the dataset, and nothing before it; remarks; approving a subject that does not wait for approval; refusals, backups and the undoing of a failed write; approving several at once; finding subjects by their comments; sending back and closing; the admin API for it |
 | `test_submission.py` | What an editor's upload is held to: the `.seg.nrrd` format, its canonical form, validation; rejections changing nothing; uploads of some bones only; the audit trail |
 | `test_confirm_as_is.py` | Judging the stored segmentation as it is, the geometry check on it, and who may accept or replace a segmentation |
 | `test_config.py` | The policy file and its `BONEHUB_QC_*` overrides |

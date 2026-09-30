@@ -1,8 +1,11 @@
 """The administrator's approval, the one step that writes into the dataset, and the other
 things the administrator does with a subject in progress.
 
-Requirement under test: "in admin panel, admin can approve all the submission and only after
-admin approval, things are overwritten in the bonehub dataset".
+Requirements under test: "in admin panel, admin can approve all the submission and only after
+admin approval, things are overwritten in the bonehub dataset"; "in admin panel, i would like
+to have filter to filter the submission having a specific keyword in them, and then maybe i
+want to approve all those subjects with a remark, so that the remark get written in the
+Subject_info_xxx.json for those filtered and approved subjects".
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+from qc_server import workflow
 from qc_server.models import EDITOR, REVIEWER
 from qc_server.store import QCError
 
@@ -217,6 +221,204 @@ class ApprovalRefusalTests(ApprovalTestCase):
         self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), corrected)
 
 
+class RemarkTextTests(unittest.TestCase):
+    """How a remark is written among a subject's remarks."""
+
+    def test_a_remark_is_tagged_once_on_one_line(self):
+        self.assertEqual(workflow.tagged_remark(" hip\n implant "), "QC: hip implant")
+        self.assertEqual(workflow.tagged_remark("qc:Hip implant"), "QC: Hip implant")
+        self.assertEqual(workflow.tagged_remark("QCT artefacts"), "QC: QCT artefacts")
+        for nothing in (None, "", "  ", "QC: "):
+            self.assertIsNone(workflow.tagged_remark(nothing), repr(nothing))
+
+    def test_a_remark_goes_after_the_others_unless_it_is_one_of_them(self):
+        self.assertEqual(workflow.with_remark(None, "QC: Hip implant"), "QC: Hip implant")
+        self.assertEqual(
+            workflow.with_remark("3 fractures at SACRUM", "QC: Hip implant"), "3 fractures at SACRUM; QC: Hip implant"
+        )
+        self.assertIsNone(workflow.with_remark("3 fractures at SACRUM;QC:  hip IMPLANT", "QC: Hip implant"))
+        self.assertIsNone(workflow.with_remark("QC: a; b; QC: c", "QC: a; b"), "a remark of its own with a ';'")
+        self.assertEqual(
+            workflow.with_remark("QC: Hip implant, left", "QC: Hip implant"), "QC: Hip implant, left; QC: Hip implant"
+        )
+
+
+class RemarkTests(ApprovalTestCase):
+    """A remark added to the subject's Subject_info as it is approved."""
+
+    def remarks(self) -> str | None:
+        return self.builder.subject_info(1, 1).get("remarks")
+
+    def given_remarks(self, remarks: str) -> None:
+        """Remarks in Subject_info already, as a converter writes them."""
+        path = self.dataset_root / "Dataset_001" / "Subject_info_001.json"
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        entries[0]["remarks"] = remarks
+        path.write_text(json.dumps(entries, indent=4), encoding="utf-8")
+
+    def test_the_remark_is_written_with_its_tag(self):
+        self.review(self.store, self.rita, comment="hip implant")
+        outcome = self.store.approve(KEY, remark="Hip implant")
+        self.assertEqual(self.remarks(), "QC: Hip implant")
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertTrue(outcome.remark_added)
+        self.assertIn("'QC: Hip implant' added to its remarks", outcome.message)
+
+    def test_the_remarks_the_converter_wrote_are_kept(self):
+        self.given_remarks("Metal artifact present")
+        self.review(self.store, self.rita)
+        self.store.approve(KEY, remark="Hip implant")
+        self.assertEqual(self.remarks(), "Metal artifact present; QC: Hip implant")
+
+    def test_a_remark_there_already_is_not_added_again(self):
+        self.given_remarks("Metal artifact present; qc:  hip IMPLANT")
+        self.review(self.store, self.rita)
+        outcome = self.store.approve(KEY, remark="Hip implant")
+        self.assertFalse(outcome.remark_added)
+        self.assertEqual(self.remarks(), "Metal artifact present; qc:  hip IMPLANT")
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2}, "the approval itself goes ahead")
+
+    def test_a_blank_remark_leaves_the_remarks_alone(self):
+        self.given_remarks("Metal artifact present")
+        self.review(self.store, self.rita)
+        self.store.approve(KEY, remark="   ")
+        self.assertEqual(self.remarks(), "Metal artifact present")
+
+    def test_a_remark_too_long_is_refused_and_nothing_is_written(self):
+        self.review(self.store, self.rita)
+        before = self.builder.all_subject_info(1)
+        with self.assertRaises(QCError) as ctx:
+            self.store.approve(KEY, remark="x" * 600)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(self.builder.all_subject_info(1), before)
+        self.assertEqual(self.store.case_of(KEY).stage, "approval")
+
+    def test_the_remark_is_recorded_with_the_approval(self):
+        self.review(self.store, self.rita)
+        self.store.approve(KEY, remark="Hip implant")
+        step = self.store.case_of(KEY).events[-1]
+        self.assertEqual((step.action, step.comment, step.details["remark_added"]), ("approve", "QC: Hip implant", True))
+        self.assertEqual(self.store.audit.read_recent(kind="approved")[0]["remark"], "QC: Hip implant")
+        log = self.builder.dataset_log(1).read_text(encoding="utf-8")
+        self.assertIn("'QC: Hip implant' added to its remarks", log)
+
+
+class ApproveUnacceptedTests(ApprovalTestCase):
+    """A subject approved before it waits for approval: what a reviewer accepted becomes reviewed,
+    and every other label keeps its status."""
+
+    def reject_right_femur(self, comment: str | None = "hip implant") -> None:
+        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"}, comment=comment)
+
+    def test_only_the_labels_a_reviewer_accepted_become_reviewed(self):
+        self.reject_right_femur()
+        outcome = self.store.approve(KEY, remark="Hip implant", allow_unaccepted=True)
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.builder.subject_info(1, 1)["remarks"], "QC: Hip implant")
+        self.assertEqual(outcome.case.stage, "applied")
+        self.assertEqual(outcome.case.events[-1].details["not_accepted"], ["FEMUR_RIGHT"])
+        self.assertIn("1 label(s) nobody accepted keep their status", outcome.message)
+
+    def test_it_is_refused_unless_asked_for(self):
+        self.reject_right_femur()
+        with self.assertRaises(QCError) as ctx:
+            self.store.approve(KEY, remark="Hip implant")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertNotIn("remarks", self.builder.subject_info(1, 1))
+
+    def test_a_subject_rejected_as_a_whole_keeps_every_status(self):
+        assignment = self.store.next_subject(self.rita, REVIEWER)
+        self.store.submit(assignment.assignment_id, self.rita, False, None, comment="hip implant")
+        self.store.approve(KEY, remark="Hip implant", allow_unaccepted=True)
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.builder.subject_info(1, 1)["remarks"], "QC: Hip implant")
+        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.original)
+
+    def test_a_status_is_never_lowered(self):
+        """A label reviewed in the dataset already, and rejected in a second review, stays reviewed."""
+        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+        store = self.make_store(eligible_label_values=[1, 2])
+        self.review(store, self.rita)  # subject 1
+        assignment = store.next_subject(self.rita, REVIEWER)
+        store.submit(assignment.assignment_id, self.rita, False, None, comment="hip implant")
+        store.approve("001_000002", allow_unaccepted=True)
+        self.assertEqual(self.statuses(2), {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+
+    def test_the_approval_says_what_nobody_accepted(self):
+        self.reject_right_femur()
+        self.store.approve(KEY, allow_unaccepted=True)
+        entry = self.store.audit.read_recent(kind="approved")[0]
+        self.assertEqual((entry["from_stage"], entry["not_accepted"]), ("edit", ["FEMUR_RIGHT"]))
+        log = self.builder.dataset_log(1).read_text(encoding="utf-8")
+        self.assertIn("while it waited for an editor", log)
+        self.assertIn("nobody accepted them: FEMUR_RIGHT (needs correction, by 'rita')", log)
+
+    def test_a_correction_nobody_reviewed_is_written_but_not_marked_reviewed(self):
+        self.reject_right_femur()
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        self.assertEqual(self.store.case_of(KEY).stage, "review")
+        corrected = (self.state_dir / "staged" / "Dataset_001" / f"{KEY}.seg.nrrd").read_bytes()
+        outcome = self.store.approve(KEY, allow_unaccepted=True)
+        self.assertTrue(outcome.segmentation_written)
+        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), corrected)
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+
+    def test_a_subject_an_editor_gave_up_on_can_be_approved(self):
+        self.reject_right_femur()
+        assignment = self.store.next_subject(self.eddie, EDITOR)
+        self.store.submit(assignment.assignment_id, self.eddie, False, None, comment="an implant, nothing to fix")
+        self.store.approve(KEY, remark="Hip implant", allow_unaccepted=True)
+        self.assertEqual(self.store.case_of(KEY).stage, "applied")
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+
+    def test_a_closed_subject_can_be_approved(self):
+        self.reject_right_femur()
+        self.store.close_case(KEY, "implant")
+        self.store.approve(KEY, allow_unaccepted=True)
+        self.assertEqual(self.make_store().case_of(KEY).stage, "applied", "and stays approved after a restart")
+
+    def test_a_subject_in_somebodys_hands_is_not_approved(self):
+        self.reject_right_femur()
+        self.store.next_subject(self.eddie, EDITOR)
+        with self.assertRaises(QCError) as ctx:
+            self.store.approve(KEY, allow_unaccepted=True)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("eddie", ctx.exception.message)
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+
+    def test_a_subject_that_changed_since_it_was_listed_is_not_approved(self):
+        self.reject_right_femur()
+        seen = self.store.case_of(KEY).revision
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        with self.assertRaises(QCError) as ctx:
+            self.store.approve(KEY, allow_unaccepted=True, revision=seen)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("changed after you listed it", ctx.exception.message)
+        self.assertEqual(self.store.case_of(KEY).stage, "review")
+
+    def test_a_subject_being_approved_is_handed_to_nobody(self):
+        self.reject_right_femur()
+        self.store._applying.add(KEY)
+        with self.assertRaises(QCError) as ctx:
+            self.store.next_subject(self.eddie, EDITOR)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_a_late_verdict_on_a_subject_being_approved_is_refused(self):
+        """An editor whose lease ran out uploads while the approval is being written."""
+        self.reject_right_femur()
+        assignment = self.store.next_subject(self.eddie, EDITOR)
+        assignment.expires_at = "2000-01-01T00:00:00Z"
+        self.store.stats()  # the lease expires
+        self.store._applying.add(KEY)
+        upload = self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        with self.assertRaises(QCError) as ctx:
+            self.store.submit(assignment.assignment_id, self.eddie, True, upload)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("approving", ctx.exception.message)
+        self.assertEqual(self.store.case_of(KEY).stage, "edit")
+
+
 class ApproveAllTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -225,6 +427,27 @@ class ApproveAllTests(QCTestCase):
         self.rita = self.store.create_user("rita", roles=[REVIEWER])[0]
         for _ in range(4):
             self.review(self.store, self.rita)
+
+    def test_the_subjects_named_are_approved_with_the_remark(self):
+        results = self.store.approve_all(["001_000001", "001_000003"], remark="Hip implant")
+        self.assertEqual([(r["approved"], r["remark_added"]) for r in results], [(True, True)] * 2)
+        remarks = [entry.get("remarks") for entry in self.builder.all_subject_info(1)]
+        self.assertEqual(remarks, ["QC: Hip implant", None, "QC: Hip implant", None])
+        self.assertEqual(self.store.case_of("001_000002").stage, "approval")
+
+    def test_a_remark_too_long_approves_nothing(self):
+        with self.assertRaises(QCError):
+            self.store.approve_all(remark="x" * 600)
+        self.assertEqual(self.store.stats().awaiting_approval, 4)
+
+    def test_a_subject_changed_since_it_was_listed_is_left_out(self):
+        seen = {key: self.store.case_of(key).revision for key in ("001_000001", "001_000002")}
+        self.store.return_case("001_000002", "review")
+        self.review(self.store, self.rita)  # waits for approval again, but not as it was listed
+        results = {r["subject_key"]: r for r in self.store.approve_all(list(seen), revisions=seen)}
+        self.assertTrue(results["001_000001"]["approved"])
+        self.assertFalse(results["001_000002"]["approved"])
+        self.assertIn("changed after you listed it", results["001_000002"]["message"])
 
     def test_every_subject_waiting_for_approval_is_approved(self):
         results = self.store.approve_all()
@@ -413,6 +636,63 @@ class AdminApiTests(ApiTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, self.builder.segmentation_file(1, 1).read_bytes())
         self.assertEqual(self.client.get("/admin/api/cases/001_000099", headers=self.admin_headers).status_code, 404)
+
+    def test_subjects_are_found_by_what_their_comments_say(self):
+        self.judge(self.alice_key, comment="Hip  IMPLANT on the left")
+        self.judge(self.bob_key, comment="clean", rejected_labels={"FEMUR_RIGHT": "quality"})
+        listed = self.client.get("/admin/api/cases?comment=hip%20implant", headers=self.admin_headers).json()
+        self.assertEqual([case["subject_key"] for case in listed], [KEY])
+        self.assertEqual([step["comment"] for step in listed[0]["matches"]], ["Hip  IMPLANT on the left"])
+        by_stage = self.client.get("/admin/api/cases?stage=edit&comment=implant", headers=self.admin_headers).json()
+        self.assertEqual(by_stage, [])
+        unfiltered = self.client.get("/admin/api/cases", headers=self.admin_headers).json()
+        self.assertEqual(len(unfiltered), 2)
+        self.assertNotIn("matches", unfiltered[0])
+
+    def test_the_administrators_own_comments_are_searched_too(self):
+        self.accept(self.alice_key)
+        self.client.post(
+            f"/admin/api/cases/{KEY}/return", json={"to": "review", "comment": "Look at the implant"},
+            headers=self.admin_headers,
+        )
+        listed = self.client.get("/admin/api/cases?comment=implant", headers=self.admin_headers).json()
+        self.assertEqual([(step["by"], step["action"]) for step in listed[0]["matches"]], [("admin", "return")])
+
+    def test_ticked_subjects_are_approved_with_a_remark(self):
+        self.accept(self.alice_key)
+        self.accept(self.bob_key)
+        revision = self.client.get(f"/admin/api/cases/{KEY}", headers=self.admin_headers).json()["revision"]
+        body = self.client.post(
+            "/admin/api/cases/approve",
+            json={"subject_keys": [KEY], "remark": "Hip implant", "revisions": {KEY: revision}},
+            headers=self.admin_headers,
+        ).json()
+        self.assertEqual((body["approved"], body["results"][0]["remark_added"]), (1, True))
+        self.assertEqual(self.builder.subject_info(1, 1)["remarks"], "QC: Hip implant")
+        self.assertNotIn("remarks", self.builder.subject_info(1, 2))
+        other = self.client.get("/admin/api/cases/001_000002", headers=self.admin_headers).json()
+        self.assertEqual(other["stage"], "approval")
+
+    def test_a_subject_not_waiting_for_approval_is_approved_only_when_asked_for(self):
+        self.judge(self.alice_key, rejected_labels={"FEMUR_RIGHT": "quality"}, comment="hip implant")
+        refused = self.client.post("/admin/api/cases/approve", json={"subject_keys": [KEY]}, headers=self.admin_headers)
+        self.assertFalse(refused.json()["results"][0]["approved"])
+        allowed = self.client.post(
+            f"/admin/api/cases/{KEY}/approve", json={"remark": "Hip implant", "allow_unaccepted": True},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+        self.assertEqual((allowed.json()["updated_labels"], allowed.json()["remark_added"]), ({"FEMUR_LEFT": 2}, True))
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+
+    def test_an_approval_asked_for_wrongly_is_refused(self):
+        self.accept(self.alice_key)
+        for body in ({"allow_unaccepted": "yes"}, {"revisions": [1]}, {"remark": 5}, {"subject_keys": KEY}):
+            response = self.client.post("/admin/api/cases/approve", json=body, headers=self.admin_headers)
+            self.assertEqual(response.status_code, 400, body)
+        response = self.client.post(f"/admin/api/cases/{KEY}/approve", json={"revision": "3"}, headers=self.admin_headers)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
 
     def test_the_editors_correction_is_what_is_downloaded(self):
         handout = self.next_subject(self.alice_key, REVIEWER)

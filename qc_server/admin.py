@@ -146,21 +146,37 @@ def submissions(limit: int = 100, kind: str | None = None, store: QCStore = Depe
 
 
 @router.get("/api/cases")
-def cases(stage: str | None = None, limit: int = 500, store: QCStore = Depends(require_admin)) -> list[dict]:
+def cases(
+    stage: str | None = None, limit: int = 500, comment: str | None = None, store: QCStore = Depends(require_admin)
+) -> list[dict]:
     """The subjects with a verdict on this server, most recently changed first. ``stage`` takes
-    one stage or several, comma-separated: review, edit, approval, escalated, applied, closed."""
+    one stage or several, comma-separated: review, edit, approval, escalated, applied, closed.
+    ``comment`` keeps the subjects with a comment that contains it, ignoring case, each with the
+    steps whose comment does in ``matches``."""
     stages = [s.strip() for s in stage.split(",") if s.strip()] if stage else None
-    return store.cases(stages=stages, limit=limit)
+    return store.cases(stages=stages, limit=limit, comment=comment)
 
 
 @router.post("/api/cases/approve")
 def approve_all(payload: dict | None = None, store: QCStore = Depends(require_admin)) -> dict:
     """Approve the subjects named in ``subject_keys``, or every subject waiting for approval.
-    One that cannot be approved is reported, and the others go ahead."""
-    keys = (payload or {}).get("subject_keys")
+    One that cannot be approved is reported, and the others go ahead.
+
+    ``remark`` is added to each subject's remarks in Subject_info, as ``QC: <remark>``.
+    ``allow_unaccepted`` approves subjects that do not wait for approval too: their labels
+    nobody accepted keep their status. ``revisions`` maps a subject key to the revision the
+    subject was seen at; one that changed since is not approved.
+    """
+    payload = payload or {}
+    keys = payload.get("subject_keys")
     if keys is not None and not isinstance(keys, list):
         raise QCError("subject_keys must be a list of subject keys, such as ['001_000001'].")
-    results = store.approve_all([str(key) for key in keys] if keys is not None else None)
+    results = store.approve_all(
+        [str(key) for key in keys] if keys is not None else None,
+        remark=payload.get("remark"),
+        allow_unaccepted=_parse_flag(payload, "allow_unaccepted"),
+        revisions=_parse_revisions(payload.get("revisions")),
+    )
     return {"approved": sum(1 for r in results if r["approved"]), "results": results}
 
 
@@ -181,15 +197,27 @@ def case_segmentation(subject_key: str, store: QCStore = Depends(require_admin))
 
 
 @router.post("/api/cases/{subject_key}/approve")
-def approve(subject_key: str, store: QCStore = Depends(require_admin)) -> dict:
+def approve(subject_key: str, payload: dict | None = None, store: QCStore = Depends(require_admin)) -> dict:
     """Write the subject into the dataset: its accepted labels become reviewed (2), and an
-    editor's correction replaces the dataset's segmentation."""
-    outcome = store.approve(subject_key)
+    editor's correction replaces the dataset's segmentation. ``remark``, ``allow_unaccepted``
+    and ``revision`` are as for approving several at once."""
+    payload = payload or {}
+    revision = payload.get("revision")
+    if revision is not None and (not isinstance(revision, int) or isinstance(revision, bool)):
+        raise QCError("revision must be the whole number the case listing gives the subject.")
+    outcome = store.approve(
+        subject_key,
+        remark=payload.get("remark"),
+        allow_unaccepted=_parse_flag(payload, "allow_unaccepted"),
+        revision=revision,
+    )
     return {
         "case": outcome.case.model_dump(),
         "updated_labels": outcome.updated_labels,
         "segmentation_written": outcome.segmentation_written,
         "backup_path": outcome.backup_path,
+        "remark": outcome.remark,
+        "remark_added": outcome.remark_added,
         "message": outcome.message,
     }
 
@@ -253,6 +281,27 @@ def _parse_dataset_ids(raw) -> list[int] | None:
         return sorted({int(item) for item in items})
     except (TypeError, ValueError) as exc:
         raise QCError(f"allowed_dataset_ids must contain integers: {exc}") from exc
+
+
+def _parse_flag(payload: dict, name: str) -> bool:
+    """A true or false in the body; absent or null is false."""
+    value = payload.get(name)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise QCError(f"{name} must be true or false.")
+    return value
+
+
+def _parse_revisions(raw) -> dict[str, int] | None:
+    """Subject key -> the revision the administrator saw the subject at, as the case listing gives it."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in raw.values()
+    ):
+        raise QCError("revisions must map subject keys to the revisions the case listing gives them.")
+    return {str(key): value for key, value in raw.items()}
 
 
 def _parse_roles(raw) -> list[str]:

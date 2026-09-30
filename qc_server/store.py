@@ -116,6 +116,9 @@ LABEL_NAME_TO_VALUE: dict[str, int] = {label.name: label.value for label in Bone
 #: How much of a file is read at a time to fingerprint it.
 _HASH_CHUNK_BYTES = 2 * 1024 * 1024
 
+#: The longest remark an approval adds to a subject's Subject_info, its tag included.
+MAX_REMARK_LENGTH = 500
+
 #: What each stage waits for, in messages.
 _STAGE_WAITS_FOR = {
     workflow.REVIEW: "a reviewer",
@@ -681,7 +684,8 @@ class QCStore:
                 # that lost its local copy can pick the same work back up.
                 return sorted(held, key=lambda a: a.assigned_at)[0]
 
-            leased = self._leased_subjects()
+            # A subject whose approval is being written is finished, whatever stage it was at.
+            leased = self._leased_subjects() | self._applying
             chosen = next(
                 (
                     (ref, case)
@@ -906,16 +910,38 @@ class QCStore:
             utc_now_iso(),
         )
 
-    def cases(self, stages: Iterable[str] | None = None, limit: int = 500) -> list[dict]:
+    def cases(self, stages: Iterable[str] | None = None, limit: int = 500, comment: str | None = None) -> list[dict]:
         """The cases of this server, most recently changed first, each with ``leased_to``: who
-        holds the subject right now, if anybody."""
+        holds the subject right now, if anybody.
+
+        ``comment`` keeps the cases with a comment that contains it, anywhere in their history
+        and whoever wrote it, ignoring case and spacing. Each then carries ``matches``: the steps
+        of its history whose comment does.
+        """
         wanted = set(stages) if stages else None
+        needle = _searchable(comment)
         with self._lock:
             self._expire_stale_assignments()
             holders = {a.subject_key: a.user for a in self._assignments.values() if a.state == "assigned"}
-            found = [case for case in self._cases.values() if wanted is None or case.stage in wanted]
-            found.sort(key=lambda case: case.updated_at, reverse=True)
-            return [{**case.model_dump(), "leased_to": holders.get(case.subject_key)} for case in found[:limit]]
+            found: list[tuple[Case, list]] = []
+            for case in self._cases.values():
+                if wanted is not None and case.stage not in wanted:
+                    continue
+                if needle is None:
+                    found.append((case, []))
+                    continue
+                matches = [event for event in case.events if needle in (_searchable(event.comment) or "")]
+                if matches:
+                    found.append((case, matches))
+            found.sort(key=lambda item: item[0].updated_at, reverse=True)
+            return [
+                {
+                    **case.model_dump(),
+                    "leased_to": holders.get(case.subject_key),
+                    **({"matches": [event.model_dump() for event in matches]} if needle is not None else {}),
+                }
+                for case, matches in found[:limit]
+            ]
 
     def case_segmentation_path(self, subject_key: str) -> Path:
         """The segmentation a case is about: its editor's correction, or the dataset's own."""
@@ -1471,9 +1497,16 @@ class QCStore:
 
         A user whose lease ran out may still submit, so their work is not lost -- unless the
         subject has been handed to someone else since, or its case changed after the user was
-        handed it, or after the verdict was checked against it.
+        handed it, or after the verdict was checked against it, or the administrator is
+        approving it right now.
         """
         key = assignment.subject_key
+        if key in self._applying:
+            raise QCError(
+                f"The administrator is approving {key} right now, so the verdict was not recorded. Ask for the "
+                "next subject.",
+                status_code=409,
+            )
         if assignment.state == "expired":
             later = False
             for other in reversed(self._assignments.values()):
@@ -1539,37 +1572,59 @@ class QCStore:
         return self.state_dir / TMP_DIR_NAME / f"{prefix}_{uuid.uuid4().hex}{SEGMENTATION_SUFFIX}"
 
     # --------------------------------------------------------------- approval
-    def approve(self, subject_key: str) -> "ApprovalOutcome":
+    def approve(
+        self,
+        subject_key: str,
+        remark: str | None = None,
+        allow_unaccepted: bool = False,
+        revision: int | None = None,
+    ) -> "ApprovalOutcome":
         """Write an approved subject into the dataset.
 
         The accepted labels become reviewed (2) in ``Subject_info``, labels no longer in the
         segmentation not available (0) under ``mark_removed_labels_absent``, and an editor's
-        correction replaces the dataset's segmentation, which is backed up first. Refused when
-        the subject is not waiting for approval, and when the dataset's segmentation changed
-        after its quality check began: another server or tool wrote it, and approving would
-        overwrite what they wrote.
+        correction replaces the dataset's segmentation, which is backed up first. ``remark`` is
+        added to the subject's remarks as ``QC: <remark>``, unless they say so already.
+
+        A subject is approved once it waits for approval. ``allow_unaccepted`` approves one at
+        any other stage too -- one a reviewer rejected, an editor gave up on, or the
+        administrator closed -- and the labels nobody accepted keep the status the dataset
+        gives them. Refused when somebody holds the subject, when its case changed after the
+        administrator saw it at ``revision``, and when the dataset's segmentation changed after
+        its quality check began: another server or tool wrote it, and approving would overwrite
+        what they wrote.
         """
+        remark = _check_remark(remark)
         with self._lock:
-            case = self._cases.get(subject_key)
-            if case is None:
-                raise QCError(f"Nobody has given a verdict on subject {subject_key} on this server.", status_code=404)
-            if case.stage != workflow.APPROVAL:
+            case = self._admin_case(subject_key)
+            if revision is not None and case.revision != revision:
+                raise QCError(
+                    f"Subject {subject_key} changed after you listed it; it now waits for "
+                    f"{_STAGE_WAITS_FOR[case.stage]}. Look at it again before approving it.",
+                    status_code=409,
+                )
+            if case.stage != workflow.APPROVAL and not allow_unaccepted:
                 raise QCError(
                     f"Subject {subject_key} is not waiting for approval: it waits for {_STAGE_WAITS_FOR[case.stage]}.",
                     status_code=409,
                 )
-            if subject_key in self._applying:
-                raise QCError(f"Subject {subject_key} is being approved already.", status_code=409)
             self._applying.add(subject_key)
             snapshot = case.model_copy(deep=True)
         try:
             with self._dataset_lock:
-                updated, backup_path = self._write_approved(snapshot)
+                updated, backup_path, remark_added = self._write_approved(snapshot, remark)
                 now = utc_now_iso()
                 with self._lock:
                     case = self._cases[subject_key]
                     written = case.staged
-                    workflow.mark_applied(case, updated, str(backup_path) if backup_path else None, now)
+                    details = workflow.mark_applied(
+                        case,
+                        updated,
+                        str(backup_path) if backup_path else None,
+                        now,
+                        remark=remark,
+                        remark_added=remark_added,
+                    )
                     self._archive(case)
                     # Keep the cached index honest until the next full rebuild.
                     self._index = [ref for ref in self._index if ref.subject_key != subject_key]
@@ -1582,13 +1637,18 @@ class QCStore:
         target = self.segmentation_path(applied.dataset_id, applied.subject_id)
         reviewed = sorted(name for name, status in updated.items() if status == 2)
         removed = sorted(name for name, status in updated.items() if status == 0)
+        not_accepted = details["not_accepted"]
         self.audit.record(
             "approved",
             {
                 "subject_key": subject_key,
                 "dataset_id": applied.dataset_id,
                 "subject_id": applied.subject_id,
+                "from_stage": snapshot.stage,
                 "updated_labels": updated,
+                "not_accepted": not_accepted,
+                "remark": remark,
+                "remark_added": remark_added,
                 "segmentation_written": written,
                 "segmentation_path": str(target),
                 "backup_path": applied.backup_path,
@@ -1596,9 +1656,14 @@ class QCStore:
             },
             dataset_id=applied.dataset_id,
             summary=(
-                f"Subject {subject_key} approved: {len(reviewed)} label(s) set to 2 (reviewed)"
+                f"Subject {subject_key} approved"
+                + (f" while it waited for {_STAGE_WAITS_FOR[snapshot.stage]}" if snapshot.stage != workflow.APPROVAL else "")
+                + f": {len(reviewed)} label(s) set to 2 (reviewed)"
                 + (f" ({', '.join(reviewed)})" if reviewed else "")
                 + (f"; {', '.join(removed)} set to 0 (not available)" if removed else "")
+                + (f"; not set to 2, as nobody accepted them: {_not_accepted_text(applied)}" if not_accepted else "")
+                + (f"; '{remark}' added to its remarks" if remark_added else "")
+                + (f"; its remarks said '{remark}' already" if remark and not remark_added else "")
                 + (
                     f"; the corrected segmentation by '{snapshot.edited_by}' written to '{target}'."
                     if written
@@ -1613,15 +1678,22 @@ class QCStore:
             updated_labels=updated,
             segmentation_written=written,
             backup_path=applied.backup_path,
+            remark=remark,
+            remark_added=remark_added,
             message=(
                 f"Approved: {len(reviewed)} label(s) set to reviewed"
-                + (" and the corrected segmentation written into the dataset." if written else ".")
+                + (" and the corrected segmentation written into the dataset" if written else "")
+                + (f"; {len(not_accepted)} label(s) nobody accepted keep their status" if not_accepted else "")
+                + (f"; '{remark}' added to its remarks" if remark_added else "")
+                + (f"; its remarks said '{remark}' already" if remark and not remark_added else "")
+                + "."
             ),
         )
 
-    def _write_approved(self, case: Case) -> tuple[dict[str, int], Path | None]:
-        """Caller holds the dataset lock. Write a case into the dataset; returns the statuses set
-        and where the dataset's previous segmentation was backed up.
+    def _write_approved(self, case: Case, remark: str | None = None) -> tuple[dict[str, int], Path | None, bool]:
+        """Caller holds the dataset lock. Write a case into the dataset, and ``remark`` into the
+        subject's remarks; returns the statuses set, where the dataset's previous segmentation
+        was backed up, and whether the remark was added (not there already).
 
         If ``Subject_info`` cannot be written after the segmentation was, the segmentation is
         put back, so that the dataset is not left half approved.
@@ -1664,11 +1736,17 @@ class QCStore:
                 shutil.copy2(target, previous)
             target.parent.mkdir(parents=True, exist_ok=True)
             _replace(staged, target)
+        remark_added = False
         try:
 
             def apply(subject: SubjectInfo) -> None:
+                nonlocal remark_added
                 for label, status in updated.items():
                     subject.set_segmentation_value(label, status)
+                remarks = workflow.with_remark(subject.remarks, remark) if remark else None
+                if remarks is not None:
+                    subject.remarks = remarks
+                    remark_added = True
 
             self._mutate_subject_info(dataset_id, subject_id, apply)
         except Exception:
@@ -1685,19 +1763,35 @@ class QCStore:
                 _replace(previous, backup_path)
             else:
                 previous.unlink(missing_ok=True)
-        return updated, backup_path
+        return updated, backup_path, remark_added
 
-    def approve_all(self, subject_keys: Iterable[str] | None = None) -> list[dict]:
+    def approve_all(
+        self,
+        subject_keys: Iterable[str] | None = None,
+        remark: str | None = None,
+        allow_unaccepted: bool = False,
+        revisions: dict[str, int] | None = None,
+    ) -> list[dict]:
         """Approve each subject named, or every one waiting for approval; one that cannot be
-        approved is reported and the rest go ahead."""
+        approved is reported and the rest go ahead. ``remark`` and ``allow_unaccepted`` are as
+        for :meth:`approve`, and ``revisions`` holds the revision each subject was seen at."""
+        _check_remark(remark)  # a remark too long is refused before anything is approved
         if subject_keys is None:
             with self._lock:
                 subject_keys = sorted(k for k, case in self._cases.items() if case.stage == workflow.APPROVAL)
+        revisions = revisions or {}
         results = []
         for key in subject_keys:
             try:
-                outcome = self.approve(key)
-                results.append({"subject_key": key, "approved": True, "message": outcome.message})
+                outcome = self.approve(key, remark, allow_unaccepted, revisions.get(key))
+                results.append(
+                    {
+                        "subject_key": key,
+                        "approved": True,
+                        "message": outcome.message,
+                        "remark_added": outcome.remark_added,
+                    }
+                )
             except QCError as exc:
                 results.append({"subject_key": key, "approved": False, "message": exc.message})
             except Exception as exc:  # the share, for one subject, need not stop the others
@@ -1857,6 +1951,8 @@ class ApprovalOutcome:
     segmentation_written: bool
     backup_path: str | None
     message: str
+    remark: str | None = None
+    remark_added: bool = False
 
 
 # --------------------------------------------------------------------- helpers
@@ -1877,6 +1973,33 @@ def _check_label_names(names: Iterable[str]) -> None:
     unknown = sorted({name for name in names if name not in LABEL_NAME_TO_VALUE})
     if unknown:
         raise QCError(f"Unknown label names: {unknown}. See 'bonehub_data_schema/labelmap.py'.")
+
+
+def _check_remark(remark: str | None) -> str | None:
+    """The remark as Subject_info records it (see ``workflow.tagged_remark``), or None."""
+    if remark is not None and not isinstance(remark, str):
+        raise QCError("A remark is text.")
+    tagged = workflow.tagged_remark(remark)
+    if tagged is not None and len(tagged) > MAX_REMARK_LENGTH:
+        raise QCError(f"A remark is at most {MAX_REMARK_LENGTH} characters long; this one has {len(tagged)}.")
+    return tagged
+
+
+def _searchable(text: str | None) -> str | None:
+    """Text as a search compares it: in lower case, with single spaces. None when blank."""
+    return " ".join((text or "").split()).casefold() or None
+
+
+def _not_accepted_text(case: Case) -> str:
+    """The labels nobody accepted, and where each stood, for an approval that left them alone."""
+    parts = []
+    for name, label in case.labels.items():
+        if label.state == workflow.PENDING:
+            parts.append(f"{name} (waiting for a reviewer)")
+        elif label.state == workflow.REJECTED:
+            what = REJECT_REASONS.get(label.reason or "", "rejected") if label.painted else "reported missing"
+            parts.append(f"{name} ({what}, by '{label.by}')")
+    return ", ".join(parts)
 
 
 def _review_message(case: Case, details: dict) -> str:
