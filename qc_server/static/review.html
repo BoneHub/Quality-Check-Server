@@ -147,8 +147,6 @@
   .progress > div { height: 100%; width: 0; background: #4c9be8; transition: width .15s; }
   .progress.indeterminate > div { width: 30%; animation: slide 1.1s infinite ease-in-out; }
   @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
-  .held { margin-top: 18px; text-align: left; }
-  .held button { margin: 4px 6px 0 0; }
   .statusline {
     min-height: 26px; padding: 4px 10px; font-size: 12px; border-top: 1px solid #23262b;
     display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
@@ -322,9 +320,7 @@
             <h1 id="emptyTitle">Signing in…</h1>
             <p id="emptyText"></p>
             <div id="emptyMessage"></div>
-            <p style="margin-top:16px"><button class="primary" id="nextBtn" hidden>Get next subject</button></p>
-            <div class="held" id="heldList" hidden></div>
-          </div>
+            <p style="margin-top:16px"><button class="primary" id="nextBtn" hidden>Get next subject</button></p>          </div>
         </div>
 
         <div class="overlay" id="loadingState" hidden>

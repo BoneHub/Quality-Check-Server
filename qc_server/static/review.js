@@ -1243,27 +1243,13 @@ function hideLoading() {
   $("loadingState").hidden = true;
 }
 
-async function showHeld(excluding) {
+async function resumeOrWait() {
   let held = [];
   try {
     held = await api("GET", "/api/v1/assignments");
   } catch (e) {
     held = [];
   }
-  held = held.filter((a) => a.assignment_id !== excluding);
-  const list = $("heldList");
-  list.hidden = !held.length;
-  list.replaceChildren(
-    el("div", { className: "muted", style: { fontSize: "12px" } }, "You also hold:"),
-    ...held.map((a) =>
-      el("button", { className: "small", onclick: () => openAssignment(a.assignment_id) }, `Open ${a.subject_key}`),
-    ),
-  );
-  return held;
-}
-
-async function resumeOrWait() {
-  const held = await showHeld(null);
   if (held.length) {
     // Pick up where the reviewer left off, e.g. after closing the tab.
     const oldest = [...held].sort((a, b) => (a.assigned_at < b.assigned_at ? -1 : 1))[0];
@@ -1312,7 +1298,6 @@ async function openSubject(handout) {
   $("comment").value = "";
   $("missingInput").value = "";
   $("verdictMessage").replaceChildren();
-  $("heldList").hidden = true;
   renderSubject();
   renderLabels();
   updateVerdictButtons();
@@ -1916,7 +1901,6 @@ async function onExtend() {
 }
 
 async function finishSubject(message) {
-  const finished = state.handout ? state.handout.assignment_id : null;
   clearViewers();
   state.handout = null;
   state.segments = [];
@@ -1928,7 +1912,6 @@ async function finishSubject(message) {
   renderLabels();
   updateToolbar();
   showEmpty("Done", "Ask for the next subject when you are ready.", banner(message, "ok"));
-  await showHeld(finished);
   if (prefs.autoNext) {
     setBusy(false);
     await nextSubject();

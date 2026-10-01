@@ -663,8 +663,8 @@ class QCStore:
         A reviewer is handed the subjects waiting for a review: first those already in
         progress, then those nobody has looked at yet. An editor is handed the subjects a
         reviewer sent back, and those without any segmentation. Nobody reviews their own
-        correction, and nobody is handed a subject they could do nothing with. The limit on
-        subjects held applies per role.
+        correction, and nobody is handed a subject they could do nothing with. A user holds one
+        subject at a time in each role, until they submit or release it.
         """
         if role not in ROLES:
             raise QCError(f"'{role}' is not a role. Use 'reviewer' or 'editor'.")
@@ -678,10 +678,10 @@ class QCStore:
             self._expire_stale_assignments()
 
             held = self._held(user.name, role)
-            if len(held) >= self.config.max_concurrent_assignments_per_user:
+            if held:
                 # Hand back what they already hold rather than refusing outright, so a client
                 # that lost its local copy can pick the same work back up.
-                return sorted(held, key=lambda a: a.assigned_at)[0]
+                return min(held, key=lambda a: a.assigned_at)
 
             # A subject whose approval is being written is finished, whatever stage it was at.
             leased = self._leased_subjects() | self._applying

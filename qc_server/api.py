@@ -105,7 +105,6 @@ def ping(request: Request, user: User = Depends(get_user), role: str = Depends(c
         "edits_need_review": store.config.edits_need_review,
         "mark_removed_labels_absent": store.config.mark_removed_labels_absent,
         "lease_ttl_seconds": store.config.lease_ttl_seconds,
-        "max_concurrent_assignments": store.config.max_concurrent_assignments_per_user,
     }
 
 
@@ -127,9 +126,9 @@ def next_subject(
     """Lease the next subject for this user, in the role of their client.
 
     A reviewer is handed a subject waiting for a review, an editor one a reviewer sent back,
-    or one without any segmentation. If the user already holds their maximum number of
-    subjects in this role, the oldest open one is returned again instead of an error, so a
-    client that lost its local copy can simply ask for the next subject again.
+    or one without any segmentation. A user holds one subject at a time in each role: if they
+    already hold one, it is returned again instead of an error, so a client that lost its
+    local copy can simply ask for the next subject again.
     """
     store = get_store(request)
     return _handout(store, store.next_subject(user, role), user)

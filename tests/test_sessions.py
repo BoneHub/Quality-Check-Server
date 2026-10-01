@@ -94,7 +94,7 @@ class ServerSessionTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.default_dataset(n_subjects=3)
-        self.first = self.make_store(lease_ttl_seconds=3600, max_concurrent_assignments_per_user=5)
+        self.first = self.make_store(lease_ttl_seconds=3600)
         second_credentials = self.make_credentials_dir("second_volume", "qc_second_server")
         self.second = self.make_store(credentials_dir=second_credentials, lease_ttl_seconds=600)
         self.alice = self.first.create_user("alice")[0]
@@ -132,7 +132,8 @@ class ServerSessionTests(QCTestCase):
         self.assertEqual((stats.assigned, stats.assigned_by_other_servers, stats.available), (1, 1, 1))
 
     def test_a_subject_given_back_on_one_server_is_free_for_the_other(self):
-        leases = [self.first.next_subject(self.alice, REVIEWER) for _ in range(3)]
+        users = [self.alice, self.first.create_user("carol")[0], self.first.create_user("dave")[0]]
+        leases = [self.first.next_subject(user, REVIEWER) for user in users]
         with self.assertRaises(QCError) as ctx:
             self.second.next_subject(self.bob, REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)

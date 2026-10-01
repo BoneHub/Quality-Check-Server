@@ -643,10 +643,6 @@
             <input id="cfgLease" type="number" min="60" style="width:100%">
           </div>
           <div>
-            <label for="cfgMax">Max subjects per user and role</label>
-            <input id="cfgMax" type="number" min="1" style="width:100%">
-          </div>
-          <div>
             <label for="cfgStrategy">Assignment strategy</label>
             <select id="cfgStrategy" style="width:100%">
               <option value="sequential">sequential</option>
@@ -1112,7 +1108,6 @@
         config = cfg || {};
         $("cfgEligible").value = (config.eligible_label_values || []).join(",");
         $("cfgLease").value = config.lease_ttl_seconds;
-        $("cfgMax").value = config.max_concurrent_assignments_per_user;
         $("cfgStrategy").value = config.assignment_strategy;
         $("cfgEditsReview").checked = !!config.edits_need_review;
         $("cfgNoSeg").checked = !!config.include_subjects_without_segmentation;
@@ -1406,7 +1401,6 @@
         api("PUT", "/admin/api/config", {
           eligible_label_values: eligible,
           lease_ttl_seconds: Number($("cfgLease").value),
-          max_concurrent_assignments_per_user: Number($("cfgMax").value),
           assignment_strategy: $("cfgStrategy").value,
           edits_need_review: $("cfgEditsReview").checked,
           include_subjects_without_segmentation: $("cfgNoSeg").checked,

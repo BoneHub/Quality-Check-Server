@@ -32,7 +32,6 @@ class ConfigDefaultsTests(unittest.TestCase):
         self.assertTrue(config.edits_need_review, "an editor's correction goes back to a reviewer")
         self.assertIsNone(config.allowed_dataset_ids)
         self.assertEqual(config.assignment_strategy, "sequential")
-        self.assertEqual(config.max_concurrent_assignments_per_user, 1)
 
     def test_rejects_a_label_status_the_schema_does_not_define(self):
         with self.assertRaises(ValueError):
@@ -72,6 +71,17 @@ class ConfigPersistenceTests(QCTestCase):
         )
         original.save(path)
         self.assertEqual(QCServerConfig.load(path).model_dump(), original.model_dump())
+
+    def test_a_setting_an_older_server_saved_is_dropped_on_loading(self):
+        """A server updated in place still starts on the config.json its old version wrote."""
+        path = self.tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"lease_ttl_seconds": 600, "max_concurrent_assignments_per_user": 3}), encoding="utf-8"
+        )
+        config = QCServerConfig.load(path)
+        self.assertEqual(config.lease_ttl_seconds, 600)
+        config.save(path)
+        self.assertNotIn("max_concurrent_assignments_per_user", json.loads(path.read_text(encoding="utf-8")))
 
     def test_load_of_a_missing_file_gives_defaults(self):
         config = QCServerConfig.load(self.tmp_path / "nope.json")

@@ -27,19 +27,16 @@ class NextSubjectTests(QCTestCase):
         self.assertEqual(self.store.next_subject(self.alice, REVIEWER).subject_key, "001_000001")
         self.assertEqual(self.store.next_subject(self.bob, REVIEWER).subject_key, "001_000002")
 
-    def test_two_reviewers_never_hold_the_same_subject(self):
-        store = self.make_store(max_concurrent_assignments_per_user=3)
-        alice, bob = store._users["alice"], store._users["bob"]
-        handed_out = [store.next_subject(alice if i % 2 == 0 else bob, REVIEWER).subject_key for i in range(3)]
+    def test_reviewers_never_hold_the_same_subject(self):
+        carol = self.store.create_user("carol")[0]
+        handed_out = [self.store.next_subject(user, REVIEWER).subject_key for user in (self.alice, self.bob, carol)]
         self.assertEqual(len(set(handed_out)), 3)
 
     def test_the_queue_runs_out_with_a_clear_404(self):
-        store = self.make_store(max_concurrent_assignments_per_user=5)
-        alice = store._users["alice"]
-        for _ in range(3):
-            store.next_subject(alice, REVIEWER)
+        for user in (self.alice, self.bob, self.store.create_user("carol")[0]):
+            self.store.next_subject(user, REVIEWER)
         with self.assertRaises(QCError) as ctx:
-            store.next_subject(alice, REVIEWER)
+            self.store.next_subject(self.store.create_user("dave")[0], REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_asking_again_returns_the_subject_already_held(self):
@@ -48,20 +45,18 @@ class NextSubjectTests(QCTestCase):
         second = self.store.next_subject(self.alice, REVIEWER)
         self.assertEqual(first.assignment_id, second.assignment_id)
 
-    def test_the_concurrency_limit_is_honoured(self):
-        store = self.make_store(max_concurrent_assignments_per_user=2)
-        alice = store._users["alice"]
-        first = store.next_subject(alice, REVIEWER)
-        second = store.next_subject(alice, REVIEWER)
-        self.assertNotEqual(first.assignment_id, second.assignment_id)
-        self.assertEqual(len(store.open_assignments_of("alice")), 2)
-        # A third request returns the oldest open assignment instead of a new subject.
-        self.assertEqual(store.next_subject(alice, REVIEWER).assignment_id, first.assignment_id)
+    def test_a_user_holds_one_subject_at_a_time(self):
+        first = self.store.next_subject(self.alice, REVIEWER)
+        self.store.next_subject(self.alice, REVIEWER)
+        self.assertEqual([a.assignment_id for a in self.store.open_assignments_of("alice")], [first.assignment_id])
+        # Once it is handed back, the next request leases another subject.
+        self.store.release_assignment(first.assignment_id, self.alice)
+        self.assertNotEqual(self.store.next_subject(self.alice, REVIEWER).assignment_id, first.assignment_id)
 
     def test_the_random_strategy_still_hands_out_a_real_free_subject(self):
-        store = self.make_store(assignment_strategy="random", max_concurrent_assignments_per_user=3)
-        alice = store._users["alice"]
-        keys = {store.next_subject(alice, REVIEWER).subject_key for _ in range(3)}
+        store = self.make_store(assignment_strategy="random")
+        users = [store._users["alice"], store._users["bob"], store.create_user("carol")[0]]
+        keys = {store.next_subject(user, REVIEWER).subject_key for user in users}
         self.assertEqual(keys, {"001_000001", "001_000002", "001_000003"})
 
     def test_an_assignment_carries_the_reviewer_and_an_expiry(self):
@@ -198,11 +193,11 @@ class StatsTests(QCTestCase):
 
     def test_listing_assignments_can_be_filtered_and_capped(self):
         self.default_dataset(n_subjects=3)
-        store = self.make_store(max_concurrent_assignments_per_user=3)
+        store = self.make_store()
         alice = store.create_user("alice")[0]
         first = store.next_subject(alice, REVIEWER)
-        store.next_subject(alice, REVIEWER)
         store.release_assignment(first.assignment_id, alice)
+        store.next_subject(alice, REVIEWER)
 
         self.assertEqual(len(store.all_assignments()), 2)
         self.assertEqual(len(store.all_assignments(states=["released"])), 1)

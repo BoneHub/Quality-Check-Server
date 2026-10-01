@@ -29,6 +29,9 @@ DEFAULT_STATE_DIR_NAME = ".bonehub_qc"
 #: Inside the container; the Docker image and docker-compose.yml mount a volume here.
 DEFAULT_CREDENTIALS_DIR = "/var/lib/bonehub-qc"
 CONFIG_FILE_NAME = "config.json"
+#: Settings an older server saved in ``config.json`` that no longer exist. They are dropped on
+#: loading, so a server updated in place still starts.
+RETIRED_FIELDS = ("max_concurrent_assignments_per_user",)
 
 #: The schema whose label statuses and segmentation format this server implements. The
 #: schema is installed from its repository's main branch, so a newer one must stop the
@@ -83,11 +86,6 @@ class QCServerConfig(BaseModel):
         24 * 3600,
         ge=60,
         description="How long a user keeps a subject before it returns to the queue.",
-    )
-    max_concurrent_assignments_per_user: int = Field(
-        1,
-        ge=1,
-        description="How many subjects a single user may hold at the same time.",
     )
     index_refresh_seconds: int = Field(
         300,
@@ -148,6 +146,8 @@ class QCServerConfig(BaseModel):
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+        for name in RETIRED_FIELDS:
+            data.pop(name, None)
         data.update(cls._env_overrides())
         return cls(**data)
 

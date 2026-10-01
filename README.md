@@ -390,7 +390,6 @@ You can change a setting in two places:
 | --- | --- | --- | --- |
 | Eligible label statuses | `ELIGIBLE_LABEL_VALUES` | `1` | Which label statuses put a subject in the queue. `1` = not reviewed. Use `1,2` to also review already reviewed subjects |
 | Lease TTL (seconds) | `LEASE_TTL_SECONDS` | `86400` (24 h) | How long a user keeps a subject before it returns to the queue. At least 60 |
-| Max subjects per user and role | `MAX_CONCURRENT_ASSIGNMENTS_PER_USER` | `1` | How many subjects one user can hold at once, in each role |
 | Assignment strategy | `ASSIGNMENT_STRATEGY` | `sequential` | `sequential` hands out the lowest subject number first; `random` picks one at random |
 | Editors' corrections go back to a reviewer | `EDITS_NEED_REVIEW` | on | See [below](#should-corrections-go-back-to-a-reviewer) |
 | Queue subjects without segmentation | `INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION` | off | Also hand out subjects that have an image but no segmentation, to editors, to segment from scratch |
@@ -445,7 +444,9 @@ reviewer before you can approve it.
 | Editor | 3D Slicer | subjects a reviewer sent back, and subjects with no segmentation | upload a corrected segmentation, send the subject to you, hand the subject back |
 
 - New users get both roles unless you untick one. Every user needs at least one.
-- A user with both roles can hold subjects in each role at the same time.
+- A user holds one subject at a time in each role, until they submit it or hand it back.
+  Asking for the next subject before that gives them the same one again. A user with both
+  roles can hold one subject as a reviewer and one as an editor.
 - The server checks the role on every request. A reviewer who connects from 3D Slicer is told
   to use the review page. An editor-only user cannot sign in to the review page.
 - Role changes apply from the user's next request.
