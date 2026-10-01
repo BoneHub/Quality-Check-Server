@@ -47,8 +47,8 @@ class WorkflowTestCase(QCTestCase):
     def states(self) -> dict:
         return {name: label.state for name, label in self.case().labels.items()}
 
-    def reject_right_femur(self, reason: str = "quality"):
-        return self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": reason}, comment="femoral head cut off")
+    def reject_right_femur(self):
+        return self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"], comment="femoral head cut off")
 
 
 class NothingReachesTheDatasetTests(WorkflowTestCase):
@@ -156,20 +156,14 @@ class ReviewVerdictTests(WorkflowTestCase):
     def test_a_rejected_label_sends_the_subject_to_the_editors(self):
         outcome = self.reject_right_femur()
         self.assertEqual(outcome.stage, "edit")
-        self.assertEqual(outcome.rejected_labels, {"FEMUR_RIGHT": "quality"})
+        self.assertEqual(outcome.rejected_labels, ["FEMUR_RIGHT"])
         self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "rejected"})
-        self.assertEqual(self.case().labels["FEMUR_RIGHT"].reason, "quality")
-
-    def test_a_label_that_should_not_be_there_is_rejected_as_such(self):
-        self.reject_right_femur(reason="absent")
-        self.assertEqual(self.case().labels["FEMUR_RIGHT"].reason, "absent")
-        self.assertEqual(self.case().stage, "edit")
 
     def test_rejecting_the_subject_rejects_every_label_under_review(self):
         assignment = self.store.next_subject(self.rita, REVIEWER)
         outcome = self.store.submit(assignment.assignment_id, self.rita, False, None, comment="wrong patient")
         self.assertEqual(outcome.stage, "edit")
-        self.assertEqual(outcome.rejected_labels, {"FEMUR_LEFT": "quality", "FEMUR_RIGHT": "quality"})
+        self.assertEqual(outcome.rejected_labels, ["FEMUR_LEFT", "FEMUR_RIGHT"])
 
     def test_a_missing_bone_sends_the_subject_to_the_editors(self):
         outcome = self.review(self.store, self.rita, missing=["TIBIA_LEFT"], comment="the tibia is in the scan")
@@ -177,7 +171,7 @@ class ReviewVerdictTests(WorkflowTestCase):
         self.assertEqual(outcome.missing_labels, ["TIBIA_LEFT"])
         self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "accepted", "TIBIA_LEFT": "rejected"})
         label = self.case().labels["TIBIA_LEFT"]
-        self.assertEqual((label.painted, label.reason, label.by), (False, "missing", "rita"))
+        self.assertEqual((label.painted, label.by), (False, "rita"))
         self.assertEqual(self.case().events[-1].comment, "the tibia is in the scan")
 
     def test_a_listed_bone_that_is_not_painted_can_be_reported_missing(self):
@@ -186,9 +180,10 @@ class ReviewVerdictTests(WorkflowTestCase):
         write_mask(self.builder.segmentation_file(1, 2), ["FEMUR_LEFT"])
         store = self.make_store()
         self.review(store, self.rita)  # subject 1
-        outcome = self.review(store, self.rita, rejected={"SACRUM": "missing"})
+        outcome = self.review(store, self.rita, missing=["SACRUM"])
         self.assertEqual(outcome.stage, "edit")
-        self.assertEqual(store.case_of("001_000002").labels["SACRUM"].reason, "missing")
+        label = store.case_of("001_000002").labels["SACRUM"]
+        self.assertEqual((label.state, label.painted), ("rejected", False))
 
     def test_a_label_left_unjudged_keeps_the_subject_waiting_for_a_reviewer(self):
         outcome = self.review(self.store, self.rita, accepted=["FEMUR_LEFT"])
@@ -201,7 +196,7 @@ class ReviewVerdictTests(WorkflowTestCase):
         self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
         store = self.make_store()
         self.review(store, self.rita)  # subject 1 first
-        outcome = self.review(store, self.rita, rejected={"FEMUR_LEFT": "quality"})
+        outcome = self.review(store, self.rita, rejected=["FEMUR_LEFT"])
         self.assertEqual(outcome.stage, "edit")
         self.assertEqual(store.case_of("001_000002").labels["FEMUR_LEFT"].state, "rejected")
 
@@ -221,16 +216,13 @@ class ReviewVerdictTests(WorkflowTestCase):
         self.assertIsNone(self.case(), "nothing was recorded")
 
     def test_a_label_not_in_the_segmentation_cannot_be_rejected(self):
-        self.assert_refused("TIBIA_LEFT", rejected_labels={"TIBIA_LEFT": "quality"})
+        self.assert_refused("TIBIA_LEFT", rejected_labels=["TIBIA_LEFT"])
 
     def test_a_painted_label_cannot_be_reported_missing(self):
         self.assert_refused("Reject them", missing_labels=["FEMUR_RIGHT"])
 
-    def test_a_reason_must_be_one_the_server_knows(self):
-        self.assert_refused("ugly", rejected_labels={"FEMUR_RIGHT": "ugly"})
-
     def test_a_label_cannot_be_accepted_and_rejected_at_once(self):
-        self.assert_refused("both", confirmed_labels=["FEMUR_RIGHT"], rejected_labels={"FEMUR_RIGHT": "quality"})
+        self.assert_refused("both", confirmed_labels=["FEMUR_RIGHT"], rejected_labels=["FEMUR_RIGHT"])
 
     def test_a_verdict_must_judge_something(self):
         self.assert_refused("no label", confirmed_labels=[])
@@ -251,7 +243,7 @@ class EditTests(WorkflowTestCase):
         case = self.store.handout_case(assignment)
         self.assertEqual(case.stage, "edit")
         label = case.labels["FEMUR_RIGHT"]
-        self.assertEqual((label.state, label.reason, label.by), ("rejected", "quality", "rita"))
+        self.assertEqual((label.state, label.painted, label.by), ("rejected", True, "rita"))
         self.assertEqual(case.events[0].comment, "femoral head cut off")
 
     def test_the_corrected_labels_go_back_to_a_reviewer_by_default(self):
@@ -362,7 +354,7 @@ class MissingBoneTests(WorkflowTestCase):
     def test_an_editor_adds_the_bone_and_a_reviewer_checks_it(self):
         assignment = self.store.next_subject(self.eddie, EDITOR)
         label = self.store.handout_case(assignment).labels["TIBIA_LEFT"]
-        self.assertEqual((label.state, label.reason, label.painted), ("rejected", "missing", False))
+        self.assertEqual((label.state, label.painted), ("rejected", False))
         self.store.submit(assignment.assignment_id, self.eddie, True, self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"]))
         self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "accepted", "TIBIA_LEFT": "pending"})
         self.assertTrue(self.case().labels["TIBIA_LEFT"].painted)
@@ -379,12 +371,14 @@ class MissingBoneTests(WorkflowTestCase):
 class RemovalTests(WorkflowTestCase):
     """A label an editor takes out of the segmentation."""
 
-    def test_a_label_a_reviewer_said_should_not_be_there_is_removed(self):
-        self.reject_right_femur(reason="absent")
+    def test_a_rejected_label_the_editor_took_out_waits_for_a_reviewer(self):
+        """Correcting it or taking it out is the editor's call, which a reviewer checks."""
+        self.reject_right_femur()
         outcome = self.edit(self.store, self.eddie, ["FEMUR_LEFT"])
         self.assertEqual(outcome.removed_labels, ["FEMUR_RIGHT"])
-        self.assertEqual(outcome.stage, "approval", "nothing is left to review")
-        self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "removed"})
+        self.assertEqual(outcome.stage, "review")
+        label = self.case().labels["FEMUR_RIGHT"]
+        self.assertEqual((label.state, label.painted, label.edited_by), ("pending", False, "eddie"))
 
     def test_a_removal_nobody_asked_for_waits_for_a_reviewer(self):
         """A bone dropped from the upload -- on purpose or not -- is an edit like any other."""
@@ -404,13 +398,14 @@ class RemovalTests(WorkflowTestCase):
     def test_a_reviewer_undoes_a_removal_by_reporting_the_bone_missing(self):
         self.reject_right_femur()
         self.edit(self.store, self.eddie, ["FEMUR_LEFT"])
-        outcome = self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "missing"})
+        outcome = self.review(self.store, self.rita, missing=["FEMUR_RIGHT"])
         self.assertEqual(outcome.stage, "edit")
-        self.assertEqual(self.case().labels["FEMUR_RIGHT"].reason, "missing")
+        label = self.case().labels["FEMUR_RIGHT"]
+        self.assertEqual((label.state, label.painted), ("rejected", False))
 
     def test_with_edits_needing_no_review_a_removal_is_final(self):
         store = self.make_store(edits_need_review=False)
-        self.review(store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(store, self.rita, rejected=["FEMUR_RIGHT"])
         outcome = self.edit(store, self.eddie, ["FEMUR_LEFT"])
         self.assertEqual(outcome.stage, "approval")
         self.assertEqual(store.case_of(KEY).labels["FEMUR_RIGHT"].state, "removed")
@@ -490,7 +485,7 @@ class LateVerdictTests(WorkflowTestCase):
         assignment = self.store.next_subject(self.rita, REVIEWER)
         self.store.release_assignment(assignment.assignment_id)
         bob = self.store.create_user("bob", roles=[REVIEWER])[0]
-        self.review(self.store, bob, rejected={"FEMUR_LEFT": "quality"})
+        self.review(self.store, bob, rejected=["FEMUR_LEFT"])
         assignment.state = "expired"  # as if rita's lease had merely run out
         with self.assertRaises(QCError) as ctx:
             self.store.submit(assignment.assignment_id, self.rita, True, None, use_stored_segmentation=True)

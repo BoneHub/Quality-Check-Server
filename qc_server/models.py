@@ -42,16 +42,6 @@ CaseStage = Literal["review", "edit", "approval", "escalated", "applied", "close
 #: What has become of one label of a subject; see ``workflow``.
 LabelState = Literal["pending", "accepted", "rejected", "removed", "kept"]
 
-#: Why a reviewer rejected a label: its segmentation needs correcting, the bone should not be
-#: segmented at all, or it should be and is not.
-RejectReason = Literal["quality", "absent", "missing"]
-
-REJECT_REASONS: dict[str, str] = {
-    "quality": "needs correction",
-    "absent": "should not be there",
-    "missing": "is missing",
-}
-
 
 class User(BaseModel):
     """A user: a reviewer, an editor, or both. The API key itself is never stored, only its HMAC digest."""
@@ -128,7 +118,7 @@ class Assignment(BaseModel):
     comment: str | None = None
     # What the verdict did; the subject's case tells the whole story.
     accepted_labels: list[str] | None = None
-    rejected_labels: dict[str, str] | None = None
+    rejected_labels: list[str] | None = None
     missing_labels: list[str] | None = None
     edited_labels: list[str] | None = None
     removed_labels: list[str] | None = None
@@ -151,7 +141,6 @@ class CaseLabel(BaseModel):
 
     state: LabelState
     painted: bool = Field(True, description="The label is in the segmentation under quality check")
-    reason: RejectReason | None = Field(None, description="Why a reviewer rejected it")
     by: str | None = Field(None, description="Who gave it this state; None for the state the case began with")
     at: str | None = None
     edited_by: str | None = Field(None, description="The editor whose correction this label now comes from")
@@ -247,7 +236,6 @@ class HandoutLabel(BaseModel):
             "removal, waiting for a reviewer to agree; a 'rejected' one was reported missing"
         ),
     )
-    reason: RejectReason | None = None
     by: str | None = None
     edited_by: str | None = None
 
@@ -326,19 +314,16 @@ class SubmissionRequest(BaseModel):
             "quality_check_confirmed is false."
         ),
     )
-    rejected_labels: dict[str, RejectReason] | None = Field(
+    rejected_labels: list[str] | None = Field(
         None,
         description=(
-            "A reviewer's rejections, label -> 'quality' (needs correction) or 'absent' (should not be there) "
-            "for a label in the segmentation, 'missing' for one that is not. They go to the editors."
+            "Labels in the segmentation a reviewer rejects. They go to the editors, who correct each one or "
+            "take it out."
         ),
     )
     missing_labels: list[str] | None = Field(
         None,
-        description=(
-            "Labels a reviewer reports missing from the segmentation; the same as rejecting them as 'missing'. "
-            "They go to the editors."
-        ),
+        description="Labels a reviewer reports missing from the segmentation. They go to the editors, to add.",
     )
     use_stored_segmentation: bool = Field(
         False,
@@ -363,7 +348,7 @@ class SubmissionResult(BaseModel):
     stage: CaseStage = Field(..., description="Where the subject went: review, edit, approval or escalated")
     segmentation_staged: bool = Field(False, description="The uploaded segmentation waits in the server's state folder")
     accepted_labels: list[str] = Field(default_factory=list)
-    rejected_labels: dict[str, str] = Field(default_factory=dict)
+    rejected_labels: list[str] = Field(default_factory=list)
     missing_labels: list[str] = Field(default_factory=list)
     edited_labels: list[str] = Field(default_factory=list, description="Labels the upload changed or added")
     removed_labels: list[str] = Field(default_factory=list)

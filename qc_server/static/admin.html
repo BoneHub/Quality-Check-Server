@@ -703,8 +703,6 @@
         closed: "closed"
       };
 
-      var REASON_TEXT = { quality: "needs correction", absent: "should not be there", missing: "is missing" };
-
       var $ = function (id) { return document.getElementById(id); };
 
       // --- transport ------------------------------------------------------------
@@ -826,8 +824,7 @@
             if (!label.painted) { return "removed by " + label.edited_by + ", waits for a reviewer to agree"; }
             return (label.edited_by ? "corrected by " + label.edited_by + ", " : "") + "waits for a reviewer";
           case "rejected":
-            return label.painted ? "rejected by " + label.by + ": " + (REASON_TEXT[label.reason] || label.reason)
-              : "reported missing by " + label.by;
+            return (label.painted ? "rejected by " : "reported missing by ") + label.by;
           case "removed": return label.by ? "removed by " + label.by : "not in the segmentation";
           case "kept": return "reviewed in the dataset already, not under review";
           default: return label.state;
@@ -1042,7 +1039,7 @@
         }
         var accepted = (a.accepted_labels || []).length;
         var missing = (a.missing_labels || []).length;
-        var rejected = Object.keys(a.rejected_labels || {}).length - missing;
+        var rejected = (a.rejected_labels || []).length;
         return (a.quality_check_confirmed ? "" : "rejected the subject: ") + "accepted " + accepted + ", rejected " + rejected +
           (missing ? ", missing " + missing : "");
       }
@@ -1079,8 +1076,7 @@
           if (e.kind === "submission") {
             var parts = [];
             if ((e.accepted_labels || []).length) { parts.push("accepted " + names(e.accepted_labels)); }
-            var rejected = Object.keys(e.rejected_labels || {}).filter(function (n) { return e.rejected_labels[n] !== "missing"; });
-            if (rejected.length) { parts.push("rejected " + rejected.join(", ")); }
+            if ((e.rejected_labels || []).length) { parts.push("rejected " + names(e.rejected_labels)); }
             if ((e.missing_labels || []).length) { parts.push("missing " + names(e.missing_labels)); }
             if ((e.edited_labels || []).length) { parts.push("corrected " + names(e.edited_labels)); }
             if ((e.removed_labels || []).length) { parts.push("removed " + names(e.removed_labels)); }

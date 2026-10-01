@@ -50,7 +50,7 @@ class ApprovalTestCase(QCTestCase):
     def correct_right_femur(self, store=None) -> None:
         """rita rejects the right femur, eddie corrects it, and rita accepts the correction."""
         store = store or self.store
-        self.review(store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(store, self.rita, rejected=["FEMUR_RIGHT"])
         self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"], comment="head redrawn")
         self.review(store, self.rita)
 
@@ -147,8 +147,9 @@ class ApproveCorrectionTests(ApprovalTestCase):
         self.assertEqual(list((self.state_dir / "tmp").glob("*")), [])
 
     def test_a_label_the_editor_removed_becomes_not_available(self):
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "absent"})
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
         self.edit(self.store, self.eddie, ["FEMUR_LEFT"])
+        self.review(self.store, self.rita)  # agrees to the removal
         self.store.approve(KEY)
         self.assertEqual(self.statuses(), {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 0})
         self.assertEqual(self.builder.labels_in_segmentation(1, 1), {"FEMUR_LEFT"})
@@ -174,7 +175,7 @@ class ApprovalRefusalTests(ApprovalTestCase):
         self.assertEqual(self.builder.all_subject_info(1), info_before)
 
     def test_a_subject_not_waiting_for_approval_is_refused(self):
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
         self.assert_refused("an editor")
 
     def test_a_subject_nobody_judged_is_unknown(self):
@@ -308,7 +309,7 @@ class ApproveUnacceptedTests(ApprovalTestCase):
     and every other label keeps its status."""
 
     def reject_right_femur(self, comment: str | None = "hip implant") -> None:
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"}, comment=comment)
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"], comment=comment)
 
     def test_only_the_labels_a_reviewer_accepted_become_reviewed(self):
         self.reject_right_femur()
@@ -352,7 +353,7 @@ class ApproveUnacceptedTests(ApprovalTestCase):
         self.assertEqual((entry["from_stage"], entry["not_accepted"]), ("edit", ["FEMUR_RIGHT"]))
         log = self.builder.dataset_log(1).read_text(encoding="utf-8")
         self.assertIn("while it waited for an editor", log)
-        self.assertIn("nobody accepted them: FEMUR_RIGHT (needs correction, by 'rita')", log)
+        self.assertIn("nobody accepted them: FEMUR_RIGHT (rejected, by 'rita')", log)
 
     def test_a_correction_nobody_reviewed_is_written_but_not_marked_reviewed(self):
         self.reject_right_femur()
@@ -500,7 +501,7 @@ class ApprovedSubjectTests(ApprovalTestCase):
         self.builder.add_subject(1, 3, segmentation={"FEMUR_LEFT": 1})
         store = self.make_store()
         self.review(store, self.rita)  # subject 1 waits for approval
-        self.review(store, self.rita, rejected={"FEMUR_LEFT": "quality"})  # subject 2 for an editor
+        self.review(store, self.rita, rejected=["FEMUR_LEFT"])  # subject 2 for an editor
         stats = store.stats()
         self.assertEqual(
             (stats.available, stats.to_review, stats.to_edit, stats.awaiting_approval, stats.applied), (1, 0, 1, 1, 0)
@@ -531,7 +532,7 @@ class AdminActionTests(ApprovalTestCase):
         self.assertEqual(self.store.handout_case(assignment).requests[0].comment, "the femoral heads are too small")
 
     def test_a_subject_an_editor_gave_up_on_can_go_back(self):
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
         assignment = self.store.next_subject(self.eddie, EDITOR)
         self.store.submit(assignment.assignment_id, self.eddie, False, None, comment="beyond me")
         self.assertEqual(self.store.case_of(KEY).stage, "escalated")
@@ -539,7 +540,7 @@ class AdminActionTests(ApprovalTestCase):
 
     def test_a_closed_subject_is_left_alone_and_nothing_is_written(self):
         before = self.dataset_state()
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
         case = self.store.close_case(KEY, "not a usable scan")
         self.assertEqual(case.stage, "closed")
         self.assertEqual(self.dataset_state(), before)
@@ -557,7 +558,7 @@ class AdminActionTests(ApprovalTestCase):
         self.assertEqual(self.store.next_subject(self.rita, REVIEWER).subject_key, KEY)
 
     def test_a_subject_in_somebodys_hands_is_left_to_them(self):
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
         self.store.next_subject(self.eddie, EDITOR)
         for act in (lambda: self.store.return_case(KEY, "review"), lambda: self.store.close_case(KEY)):
             with self.assertRaises(QCError) as ctx:
@@ -639,7 +640,7 @@ class AdminApiTests(ApiTestCase):
 
     def test_subjects_are_found_by_what_their_comments_say(self):
         self.judge(self.alice_key, comment="Hip  IMPLANT on the left")
-        self.judge(self.bob_key, comment="clean", rejected_labels={"FEMUR_RIGHT": "quality"})
+        self.judge(self.bob_key, comment="clean", rejected_labels=["FEMUR_RIGHT"])
         listed = self.client.get("/admin/api/cases?comment=hip%20implant", headers=self.admin_headers).json()
         self.assertEqual([case["subject_key"] for case in listed], [KEY])
         self.assertEqual([step["comment"] for step in listed[0]["matches"]], ["Hip  IMPLANT on the left"])
@@ -674,7 +675,7 @@ class AdminApiTests(ApiTestCase):
         self.assertEqual(other["stage"], "approval")
 
     def test_a_subject_not_waiting_for_approval_is_approved_only_when_asked_for(self):
-        self.judge(self.alice_key, rejected_labels={"FEMUR_RIGHT": "quality"}, comment="hip implant")
+        self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"], comment="hip implant")
         refused = self.client.post("/admin/api/cases/approve", json={"subject_keys": [KEY]}, headers=self.admin_headers)
         self.assertFalse(refused.json()["results"][0]["approved"])
         allowed = self.client.post(
@@ -697,7 +698,7 @@ class AdminApiTests(ApiTestCase):
     def test_the_editors_correction_is_what_is_downloaded(self):
         handout = self.next_subject(self.alice_key, REVIEWER)
         self.submit(self.alice_key, handout["assignment_id"], True, role=REVIEWER, use_stored_segmentation=True,
-                    rejected_labels={"FEMUR_RIGHT": "quality"})
+                    rejected_labels=["FEMUR_RIGHT"])
         handout = self.next_subject(self.bob_key, EDITOR)
         self.assertEqual(handout["stage"], "edit")
         self.submit(self.bob_key, handout["assignment_id"], True, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])

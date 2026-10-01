@@ -138,7 +138,6 @@ class HealthAndAuthTests(ApiTestCase):
         self.assertEqual(body["label_name_to_value"]["FEMUR_LEFT"], LABEL_VALUE["FEMUR_LEFT"])
         self.assertNotIn("BACKGROUND", body["label_name_to_value"], "no segment can be background")
         self.assertEqual(sorted(body["label_status_values"]), ["0", "1", "2"])
-        self.assertEqual(sorted(body["reject_reasons"]), ["absent", "missing", "quality"])
         self.assertEqual(body["segmentation_suffix"], ".seg.nrrd")
         self.assertEqual(body["schema_version"], SCHEMA_VERSION)
 
@@ -294,14 +293,14 @@ class ReviewOverHttpTests(ApiTestCase):
 
         body = response.json()
         self.assertEqual((body["state"], body["stage"]), ("submitted", "edit"))
-        self.assertEqual(body["rejected_labels"], {"FEMUR_LEFT": "quality", "FEMUR_RIGHT": "quality"})
+        self.assertEqual(body["rejected_labels"], ["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.assertEqual(self.builder.all_subject_info(1), before)
         self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), before_bytes)
 
     def test_labels_are_judged_one_by_one(self):
-        body = self.judge(self.alice_key, rejected_labels={"FEMUR_RIGHT": "absent"}, missing_labels=["TIBIA_LEFT"])
+        body = self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"], missing_labels=["TIBIA_LEFT"])
         self.assertEqual(body["accepted_labels"], ["FEMUR_LEFT"])
-        self.assertEqual(body["rejected_labels"], {"FEMUR_RIGHT": "absent", "TIBIA_LEFT": "missing"})
+        self.assertEqual(body["rejected_labels"], ["FEMUR_RIGHT"])
         self.assertEqual(body["missing_labels"], ["TIBIA_LEFT"])
         self.assertEqual(body["stage"], "edit")
 
@@ -317,13 +316,13 @@ class EditOverHttpTests(ApiTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.judge(self.bob_key, rejected_labels={"FEMUR_RIGHT": "quality"}, comment="head cut off")
+        self.judge(self.bob_key, rejected_labels=["FEMUR_RIGHT"], comment="head cut off")
         self.handout = self.next_subject(self.alice_key, EDITOR)
 
     def test_the_editor_is_told_what_was_rejected_and_why(self):
         self.assertEqual((self.handout["subject_key"], self.handout["stage"]), ("001_000001", "edit"))
         labels = {label["name"]: label for label in self.handout["labels"]}
-        self.assertEqual((labels["FEMUR_RIGHT"]["state"], labels["FEMUR_RIGHT"]["reason"]), ("rejected", "quality"))
+        self.assertEqual((labels["FEMUR_RIGHT"]["state"], labels["FEMUR_RIGHT"]["painted"]), ("rejected", True))
         self.assertEqual(labels["FEMUR_LEFT"]["state"], "accepted")
         self.assertEqual(self.handout["history"][0]["comment"], "head cut off")
 
@@ -415,7 +414,7 @@ class FullRoundTripTests(ApiTestCase):
     def test_two_subjects_from_first_review_to_the_dataset(self):
         carol_key = self.create_client_user("carol", roles=["editor"])
         # alice rejects the right femur of subject 1; bob accepts subject 2 as it is.
-        self.judge(self.alice_key, rejected_labels={"FEMUR_RIGHT": "quality"}, comment="head cut off")
+        self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"], comment="head cut off")
         self.judge(self.bob_key)
 
         # carol corrects subject 1 in 3D Slicer.

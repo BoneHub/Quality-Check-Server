@@ -22,7 +22,7 @@ as it is, label by label::
     reviewer = BoneHubQCClient("http://localhost:8000", "bhqc_...", role="reviewer")
     handout = reviewer.next_subject()
     reviewer.submit(handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True,
-                    confirmed_labels=["FEMUR_LEFT"], rejected_labels={"FEMUR_RIGHT": "quality"})
+                    confirmed_labels=["FEMUR_LEFT"], rejected_labels=["FEMUR_RIGHT"])
 
 Verdicts wait on the server until its administrator approves the subject into the dataset.
 """
@@ -107,15 +107,15 @@ class BoneHubQCClient:
         confirmed_labels: list[str] | None = None,
         comment: str | None = None,
         use_stored_segmentation: bool = False,
-        rejected_labels: dict | None = None,
+        rejected_labels: list[str] | None = None,
         missing_labels: list[str] | None = None,
     ) -> dict:
         """Send the verdict back. The server keeps it until its administrator approves the subject.
 
         An editor's confirmed submission carries the corrected segmentation. A reviewer's
         judges the segmentation as it is (``use_stored_segmentation``), with labels accepted
-        (``confirmed_labels``), rejected (``rejected_labels``, label -> "quality" or "absent")
-        and reported missing (``missing_labels``). A rejection needs no file.
+        (``confirmed_labels``), rejected (``rejected_labels``; an editor corrects each one or
+        takes it out) and reported missing (``missing_labels``). A rejection needs no file.
         """
         if quality_check_confirmed and segmentation_path is None and not use_stored_segmentation:
             raise QCClientError(
@@ -126,7 +126,7 @@ class BoneHubQCClient:
         metadata = {
             "quality_check_confirmed": bool(quality_check_confirmed),
             "confirmed_labels": confirmed_labels,
-            "rejected_labels": dict(rejected_labels) if rejected_labels else None,
+            "rejected_labels": list(rejected_labels) if rejected_labels else None,
             "missing_labels": list(missing_labels) if missing_labels else None,
             "use_stored_segmentation": bool(use_stored_segmentation),
             "comment": comment,

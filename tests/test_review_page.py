@@ -19,7 +19,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from qc_server.config import QCServerConfig
-from qc_server.models import REJECT_REASONS, SubmissionRequest
+from qc_server.models import SubmissionRequest
 from qc_server.review import STATIC_DIR
 from qc_server.segmentation import SegmentationError, read_segment_table
 
@@ -128,11 +128,6 @@ class PageContractTests(unittest.TestCase):
 
     def read(self, name: str) -> str:
         return (STATIC_DIR / name).read_text(encoding="utf-8")
-
-    def test_the_review_page_knows_every_reason_to_reject_a_label(self):
-        match = re.search(r"const REASON_TEXT = \{([^}]*)\}", self.read("review.js"))
-        self.assertIsNotNone(match, "review.js names the reasons in REASON_TEXT")
-        self.assertEqual(set(re.findall(r"(\w+):", match.group(1))), set(REJECT_REASONS))
 
     def test_the_review_page_sends_the_verdict_the_server_reads(self):
         script = self.read("review.js")

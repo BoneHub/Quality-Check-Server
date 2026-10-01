@@ -20,8 +20,8 @@ and each of its labels in one *state*, painted in the segmentation under review 
                queues on), or an editor changed it. Not painted, it is an editor's removal
                waiting for a reviewer to agree.
     accepted   a reviewer accepted it -- or its editor, when edits need no review
-    rejected   a reviewer rejected it: it needs correcting ('quality'), should not be there
-               ('absent'), or, not painted, should be there and is not ('missing')
+    rejected   a reviewer rejected it: an editor corrects it or takes it out. Not painted, it
+               was reported missing: it should be there and is not.
     removed    not in the segmentation, and nobody need look at it again; set to 0 on approval
     kept       not under review -- the dataset has it as reviewed already -- and unchanged
 
@@ -31,9 +31,9 @@ segmentation. A label whose voxels it changed, one it added, and one a reviewer 
 are *edited*: they go back to ``pending`` -- or, when edits need no review, to ``accepted``
 if the editor vouches for them. A label the upload left alone keeps its state, so a
 correction that spills into an accepted neighbour takes the neighbour's acceptance away, and
-one that does not leaves it. A label the upload takes away is removed; unless a reviewer
-asked for that ('absent'), a reviewer must agree first, when edits need review. A label
-nobody has reviewed stays ``pending`` until a reviewer has: an editor's word is not a review.
+one that does not leaves it. A label the upload takes away is removed; when edits need
+review, a reviewer must agree first. A label nobody has reviewed stays ``pending`` until a
+reviewer has: an editor's word is not a review.
 
 The administrator may approve a case at any stage, not only once it waits for approval: the
 labels a reviewer accepted then become reviewed, and the labels nobody accepted keep the
@@ -48,7 +48,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .config import STATUS_NOT_AVAILABLE, STATUS_NOT_REVIEWED, STATUS_REVIEWED
-from .models import EDITOR, REJECT_REASONS, REVIEWER, Case, CaseEvent, CaseLabel, CaseRequest, FileFingerprint
+from .models import EDITOR, REVIEWER, Case, CaseEvent, CaseLabel, CaseRequest, FileFingerprint
 
 REVIEW, EDIT, APPROVAL, ESCALATED, APPLIED, CLOSED = "review", "edit", "approval", "escalated", "applied", "closed"
 
@@ -59,8 +59,6 @@ OPEN_STAGES: tuple[str, ...] = (REVIEW, EDIT, APPROVAL, ESCALATED)
 FINISHED_STAGES: tuple[str, ...] = (APPLIED, CLOSED)
 
 PENDING, ACCEPTED, REJECTED, REMOVED, KEPT = "pending", "accepted", "rejected", "removed", "kept"
-
-QUALITY, ABSENT, MISSING = "quality", "absent", "missing"
 
 #: The stage at which each role is handed a subject.
 STAGE_OF_ROLE: dict[str, str] = {REVIEWER: REVIEW, EDITOR: EDIT}
@@ -146,33 +144,31 @@ def apply_review(
     case: Case,
     reviewer: str,
     accepted: Iterable[str],
-    rejected: dict[str, str],
+    rejected: Iterable[str],
     comment: str | None,
     assignment_id: str | None,
     now: str,
     request_edit: bool = False,
 ) -> dict:
-    """A reviewer's verdict. The caller has checked the names and reasons against the case.
+    """A reviewer's verdict. The caller has checked the names against the case.
 
     An accepted label in the segmentation is accepted; accepting one that is not agrees to its
-    removal. A rejected label goes to the editors, and so does a bone reported ``missing``,
-    which the case may not have known. ``request_edit`` sends the subject to the editors even
-    when no label is rejected: a rejection of the subject as a whole with nothing under review.
+    removal. A rejected label goes to the editors, who correct it or take it out; a rejected
+    one the segmentation lacks is a bone reported missing, which the case may not have known,
+    for them to add. ``request_edit`` sends the subject to the editors even when no label is
+    rejected: a rejection of the subject as a whole with nothing under review.
     """
     accepted = sorted(set(accepted))
-    rejected = dict(sorted(rejected.items()))
+    rejected = sorted(set(rejected))
     for name in accepted:
         label = case.labels[name]
         state = ACCEPTED if label.painted else REMOVED
         case.labels[name] = CaseLabel(state=state, painted=label.painted, by=reviewer, at=now, edited_by=label.edited_by)
-    for name, reason in rejected.items():
-        if reason not in REJECT_REASONS:
-            raise ValueError(f"'{reason}' is not a reason to reject a label; give one of {sorted(REJECT_REASONS)}.")
+    for name in rejected:
         label = case.labels.get(name)
         case.labels[name] = CaseLabel(
             state=REJECTED,
             painted=label is not None and label.painted,
-            reason=reason,
             by=reviewer,
             at=now,
             edited_by=label.edited_by if label is not None else None,
@@ -182,8 +178,8 @@ def apply_review(
         case.requests.append(CaseRequest(by=reviewer, role=REVIEWER, at=now, comment=comment or None))
     details = {
         "accepted": accepted,
-        "rejected": rejected,
-        "missing": sorted(name for name, reason in rejected.items() if reason == MISSING),
+        "rejected": [name for name in rejected if case.labels[name].painted],
+        "missing": [name for name in rejected if not case.labels[name].painted],
     }
     _step(case, reviewer, REVIEWER, "review", derived_stage(case), comment, assignment_id, now, details)
     return details
@@ -227,10 +223,9 @@ def apply_edit(
         if name in present:
             continue
         if before.painted:
-            # Taken away. What a reviewer asked for is done; anything else a reviewer must see.
+            # Taken away: a reviewer must agree, when edits need review.
             removed.append(name)
-            asked = before.state == REJECTED and before.reason == ABSENT
-            state = REMOVED if asked or not edits_need_review else PENDING
+            state = PENDING if edits_need_review else REMOVED
             case.labels[name] = CaseLabel(state=state, painted=False, by=editor if state == REMOVED else None,
                                           at=now, edited_by=editor)
         elif before.state == REJECTED:

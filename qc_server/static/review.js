@@ -2,10 +2,10 @@
 //
 // Signs in with a reviewer's API key, leases subjects from /api/v1 the way the 3D Slicer
 // extension does, shows them with NiiVue, and sends the verdict back: each label under review
-// accepted or rejected -- it needs correcting, or should not be there -- and bones the
-// segmentation lacks reported missing. It cannot edit a segmentation: the verdict judges the
-// segmentation as it is (use_stored_segmentation), and what it rejects goes to an editor, in
-// 3D Slicer. Verdicts wait on the server until its administrator approves the subject.
+// accepted or rejected, and bones the segmentation lacks reported missing. It cannot edit a
+// segmentation: the verdict judges the segmentation as it is (use_stored_segmentation), and
+// what it rejects goes to an editor, in 3D Slicer, who corrects it or takes it out. Verdicts
+// wait on the server until its administrator approves the subject.
 //
 // Every request says that it comes from a reviewer, so the server refuses the key of an
 // account that is not one.
@@ -24,9 +24,6 @@ const ROLE = "reviewer";
 
 // Short names for the Subject_info label statuses; the server's full wording is the tooltip.
 const STATUS_SHORT = { 0: "absent", 1: "unreviewed", 2: "reviewed" };
-
-// Why a label is rejected, until the server says it in its own words.
-const REASON_TEXT = { quality: "needs correction", absent: "should not be there", missing: "is missing" };
 
 // CT windows, [min, max] in Hounsfield units.
 const WINDOWS = { bone: [-450, 1050], soft: [-160, 240] };
@@ -69,7 +66,6 @@ const state = {
   key: null,
   info: null, // what /api/v1/ping said about this reviewer
   statusText: {}, // label status -> the server's wording
-  reasonText: { ...REASON_TEXT }, // reason to reject -> the server's wording
   labelNames: [], // every BoneHub label, to report a missing bone by
   handout: null,
   segments: [], // the handout's segments, in label-value (anatomical) order
@@ -78,7 +74,6 @@ const state = {
   solo: null, // segment number shown alone, or null
   labels: new Map(), // label name -> what the quality check has made of it (the handout's labels)
   verdicts: new Map(), // label name -> "accept" or "reject", the reviewer's verdict
-  reasons: new Map(), // label name -> why a label in the segmentation is rejected: "quality" or "absent"
   missing: new Set(), // bones reported missing that the subject does not list
   // image and seg2d are on the slice view. segRef is the slice view's mask untouched by
   // hiding; it is on no canvas and answers "which label is here".
@@ -302,7 +297,6 @@ async function signIn(key, remember) {
   try {
     const labels = await api("GET", "/api/v1/labels");
     state.statusText = labels.label_status_values || {};
-    state.reasonText = { ...REASON_TEXT, ...(labels.reject_reasons || {}) };
     state.labelNames = Object.keys(labels.label_name_to_value || {}).sort();
   } catch (e) {
     state.statusText = {};
@@ -1313,7 +1307,6 @@ async function openSubject(handout) {
   state.solo = null;
   state.labels = new Map((handout.labels || []).map((label) => [label.name, label]));
   state.verdicts = new Map();
-  state.reasons = new Map();
   state.missing = new Set();
   // Every label starts without a verdict: the reviewer accepts or rejects each one under review.
   $("comment").value = "";
@@ -1451,7 +1444,10 @@ function labelStatus(label) {
         title: "Not in the segmentation: it becomes not available when the subject is approved. Reject it if the bone is missing.",
       };
     case "rejected":
-      return { text: `rejected${by}`, title: state.reasonText[label.reason] || "" };
+      return {
+        text: `rejected${by}`,
+        title: label.painted ? "Rejected: an editor corrects it or takes it out." : "Reported missing: an editor adds it.",
+      };
     default:
       return { text: label.state, title: "" };
   }
@@ -1521,7 +1517,7 @@ function verdictButtons(label) {
         "aria-pressed": String(verdict === "reject"),
         disabled: !judgeable,
         title: label.painted
-          ? "Reject: it needs correcting, or should not be there"
+          ? "Reject: something is wrong with it. An editor corrects it, or takes it out"
           : "Reject: the bone is in the scan and missing from the segmentation",
         onclick: () => setVerdict(label.name, "reject"),
       },
@@ -1530,8 +1526,8 @@ function verdictButtons(label) {
   );
 }
 
-// A label's row, and under a rejected one in the segmentation the reason for rejecting it.
-function labelRows(label, segment) {
+// A label's row.
+function labelRow(label, segment) {
   const status = labelStatus(label);
   const rejected = state.verdicts.get(label.name) === "reject";
   const cells = [
@@ -1548,39 +1544,15 @@ function labelRows(label, segment) {
       el("button", { className: "icon eye", title: "Hide this label", onclick: () => toggleHidden(segment) }, icon("eye")),
     );
   }
-  const rows = [
-    el(
-      "div",
-      {
-        className: `lrow${segment ? "" : " absent"}${rejected ? " rejected" : ""}`,
-        dataset: segment ? { number: segment.number } : {},
-        title: segment ? undefined : "Not in the segmentation",
-      },
-      ...cells,
-    ),
-  ];
-  if (rejected && label.painted) {
-    const reason = state.reasons.get(label.name) || "quality";
-    rows.push(
-      el(
-        "div",
-        { className: "lrow" },
-        el("span"),
-        el("span"),
-        el(
-          "select",
-          {
-            className: "lreason",
-            "aria-label": `Why ${label.name} is rejected`,
-            onchange: (event) => state.reasons.set(label.name, event.target.value),
-          },
-          el("option", { value: "quality", selected: reason === "quality" }, "Needs correction"),
-          el("option", { value: "absent", selected: reason === "absent" }, "Should not be there"),
-        ),
-      ),
-    );
-  }
-  return rows;
+  return el(
+    "div",
+    {
+      className: `lrow${segment ? "" : " absent"}${rejected ? " rejected" : ""}`,
+      dataset: segment ? { number: segment.number } : {},
+      title: segment ? undefined : "Not in the segmentation",
+    },
+    ...cells,
+  );
 }
 
 function renderLabels() {
@@ -1595,10 +1567,10 @@ function renderLabels() {
   for (const segment of state.segments) {
     listed.add(segment.label);
     const label = state.labels.get(segment.label) || { name: segment.label, state: "pending", painted: true };
-    list.append(...labelRows(label, segment));
+    list.append(labelRow(label, segment));
   }
   for (const label of state.labels.values()) {
-    if (!listed.has(label.name)) list.append(...labelRows(label, null));
+    if (!listed.has(label.name)) list.append(labelRow(label, null));
   }
   renderMissing();
 
@@ -1663,7 +1635,7 @@ function reportMissing() {
   }
   const label = state.labels.get(name);
   if (label && label.painted) {
-    showVerdictMessage(`${name} is in the segmentation already. Reject it there if it needs correcting.`, "err");
+    showVerdictMessage(`${name} is in the segmentation already. Reject it there if something is wrong with it.`, "err");
     return;
   }
   if (label) state.verdicts.set(name, "reject"); // listed, not painted: rejected as missing
@@ -1732,10 +1704,9 @@ function describeEvent(event) {
   const details = event.details || {};
   const names = (list) => (list || []).join(", ");
   if (event.action === "review") {
-    const rejected = Object.entries(details.rejected || {}).filter(([, why]) => why !== "missing");
     const parts = [];
     if ((details.accepted || []).length) parts.push(`accepted ${names(details.accepted)}`);
-    if (rejected.length) parts.push(`rejected ${rejected.map(([name, why]) => `${name} (${state.reasonText[why] || why})`).join(", ")}`);
+    if ((details.rejected || []).length) parts.push(`rejected ${names(details.rejected)}`);
     if ((details.missing || []).length) parts.push(`reported missing ${names(details.missing)}`);
     return parts.join("; ") || "reviewed it";
   }
@@ -1751,18 +1722,21 @@ function describeEvent(event) {
 }
 
 // ------------------------------------------------------------------ verdict
-// The verdict as the server takes it: accepted labels, rejected ones with their reasons, and
-// bones reported missing that the subject does not list.
+// The verdict as the server takes it: accepted labels, rejected ones in the segmentation, and
+// bones reported missing -- a label not in the segmentation that is rejected, or one the
+// subject does not list.
 function verdictToSend() {
   const accepted = [];
-  const rejected = {};
+  const rejected = [];
+  const missing = [...state.missing];
   for (const [name, verdict] of state.verdicts) {
     const label = state.labels.get(name) || { name, painted: true };
     if (!canJudge(label)) continue;
     if (verdict === "accept") accepted.push(name);
-    else rejected[name] = label.painted ? state.reasons.get(name) || "quality" : "missing";
+    else if (label.painted) rejected.push(name);
+    else missing.push(name);
   }
-  return { accepted: accepted.sort(), rejected, missing: [...state.missing].sort() };
+  return { accepted: accepted.sort(), rejected: rejected.sort(), missing: missing.sort() };
 }
 
 function setBusy(busy) {
@@ -1773,8 +1747,8 @@ function setBusy(busy) {
 
 function updateVerdictButtons() {
   const holding = !!state.handout;
-  const { accepted, rejected, missing } = holding ? verdictToSend() : { accepted: [], rejected: {}, missing: [] };
-  const toEditors = Object.keys(rejected).length + missing.length;
+  const { accepted, rejected, missing } = holding ? verdictToSend() : { accepted: [], rejected: [], missing: [] };
+  const toEditors = rejected.length + missing.length;
   const open = holding ? unjudged() : [];
   const underReview = [...state.labels.values()].some((label) => label.state === "pending");
   const ready =
@@ -1814,9 +1788,7 @@ async function onSubmit() {
     return;
   }
   const { accepted, rejected, missing } = verdictToSend();
-  const toCorrect = Object.entries(rejected).filter(([, why]) => why !== "missing");
-  const toAdd = [...Object.keys(rejected).filter((name) => rejected[name] === "missing"), ...missing].sort();
-  const toEditors = toCorrect.length + toAdd.length > 0;
+  const toEditors = rejected.length + missing.length > 0;
   const leftOver = [...state.labels.values()].some(
     (label) => label.state === "pending" && !state.verdicts.has(label.name),
   );
@@ -1825,14 +1797,14 @@ async function onSubmit() {
   if (accepted.length) {
     body.push(el("p", {}, `${accepted.length} label(s) `, el("strong", {}, "accepted"), "."));
   }
-  if (toCorrect.length) {
+  if (rejected.length) {
     body.push(
-      el("p", {}, "Rejected, for an editor to correct:"),
-      el("ul", {}, toCorrect.map(([name, why]) => el("li", {}, `${name}: ${state.reasonText[why] || why}`))),
+      el("p", {}, "Rejected, for an editor to correct or take out:"),
+      el("ul", {}, rejected.map((name) => el("li", {}, name))),
     );
   }
-  if (toAdd.length) {
-    body.push(el("p", {}, "Reported missing, for an editor to add:"), el("ul", {}, toAdd.map((name) => el("li", {}, name))));
+  if (missing.length) {
+    body.push(el("p", {}, "Reported missing, for an editor to add:"), el("ul", {}, missing.map((name) => el("li", {}, name))));
   }
   body.push(
     el(
@@ -1856,7 +1828,7 @@ async function onSubmit() {
     confirmed_labels: accepted,
     comment: commentToSend(),
   };
-  if (Object.keys(rejected).length) metadata.rejected_labels = rejected;
+  if (rejected.length) metadata.rejected_labels = rejected;
   if (missing.length) metadata.missing_labels = missing;
   await submitVerdict(metadata, "Submitting…");
 }
@@ -1951,7 +1923,6 @@ async function finishSubject(message) {
   state.byNumber = new Map();
   state.labels = new Map();
   state.verdicts = new Map();
-  state.reasons = new Map();
   state.missing = new Set();
   renderSubject();
   renderLabels();

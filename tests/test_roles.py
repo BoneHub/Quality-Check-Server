@@ -201,7 +201,7 @@ class VerdictTests(QCTestCase):
 
     def send_to_the_editors(self):
         """rita rejects the right femur of subject 1, and eddie is handed it."""
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
         return self.store.next_subject(self.eddie, EDITOR)
 
     def assert_untouched(self):
@@ -228,7 +228,7 @@ class VerdictTests(QCTestCase):
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("not a reviewer", ctx.exception.message)
         with self.assertRaises(QCError) as ctx:
-            self.store.submit(assignment.assignment_id, self.eddie, True, None, rejected_labels={"FEMUR_LEFT": "quality"})
+            self.store.submit(assignment.assignment_id, self.eddie, True, None, rejected_labels=["FEMUR_LEFT"])
         self.assertEqual(ctx.exception.status_code, 403)
         self.assert_untouched()
 
@@ -249,7 +249,7 @@ class VerdictTests(QCTestCase):
 
     def test_a_user_with_both_roles_may_give_either_verdict_but_not_review_their_own_correction(self):
         alice = self.store.create_user("alice")[0]
-        self.review(self.store, alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, alice, rejected=["FEMUR_RIGHT"])
         outcome = self.edit(self.store, alice, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
         self.assertEqual((outcome.assignment.subject_key, outcome.stage), ("001_000001", "review"))
         self.assertEqual(self.store.next_subject(alice, REVIEWER).subject_key, "001_000002")

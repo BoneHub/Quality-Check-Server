@@ -345,7 +345,7 @@ class QCTestCase(unittest.TestCase):
     # --- the workflow, one step at a time -----------------------------------
     def review(self, store, user, rejected=None, accepted=None, missing=None, comment=None):
         """``user`` leases the next subject waiting for a review and judges it, as the review
-        page does: the ``rejected`` labels with their reasons, the rest accepted unless
+        page does: the ``rejected`` labels and the ``missing`` ones, the rest accepted unless
         ``accepted`` names the ones to accept."""
         assignment = store.next_subject(user, REVIEWER)
         return store.submit(

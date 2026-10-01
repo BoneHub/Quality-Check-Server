@@ -78,7 +78,6 @@ from .models import (
     DEFAULT_DATA_ACCESS,
     DEFAULT_ROLES,
     EDITOR,
-    REJECT_REASONS,
     REVIEWER,
     ROLES,
     Assignment,
@@ -1085,7 +1084,7 @@ class QCStore:
         confirmed_labels: list[str] | None = None,
         comment: str | None = None,
         use_stored_segmentation: bool = False,
-        rejected_labels: dict[str, str] | None = None,
+        rejected_labels: list[str] | None = None,
         missing_labels: list[str] | None = None,
         role: str | None = None,
     ) -> "SubmissionOutcome":
@@ -1097,8 +1096,8 @@ class QCStore:
         which ``role``, the role of the client, must match:
 
         * a reviewer judges the segmentation as it is (``use_stored_segmentation``), label by
-          label: ``confirmed_labels`` accepted, ``rejected_labels`` rejected with a reason,
-          ``missing_labels`` reported missing. ``quality_check_confirmed=False`` rejects every
+          label: ``confirmed_labels`` accepted, ``rejected_labels`` rejected, for an editor to
+          correct or take out, and ``missing_labels`` reported missing, for an editor to add. ``quality_check_confirmed=False`` rejects every
           label under review.
         * an editor uploads the corrected segmentation (``segmentation_tmp_path``), vouching for
           ``confirmed_labels``. ``quality_check_confirmed=False`` sends the subject to the
@@ -1112,7 +1111,7 @@ class QCStore:
         if quality_check_confirmed and use_stored_segmentation and segmentation_tmp_path is not None:
             raise QCError("Send a segmentation file or set use_stored_segmentation, not both.")
         comment = (comment or "").strip() or None
-        rejected_labels = dict(rejected_labels or {})
+        rejected_labels = list(rejected_labels or [])
         missing_labels = list(missing_labels or [])
         as_role = self._verdict_role(
             assignment,
@@ -1198,7 +1197,7 @@ class QCStore:
         upload: Path | None,
         use_stored: bool,
         confirmed_labels: list[str] | None,
-        rejected: dict[str, str],
+        rejected: list[str],
         missing: list[str],
         comment: str | None,
     ) -> "SubmissionOutcome":
@@ -1216,10 +1215,7 @@ class QCStore:
         if not confirmed:
             # The subject as a whole: whatever is under review goes to the editors.
             accepted = []
-            rejected = {
-                name: workflow.QUALITY if name in painted else workflow.MISSING
-                for name in workflow.labels_in(case, workflow.PENDING)
-            }
+            rejected = workflow.labels_in(case, workflow.PENDING)
         else:
             if not use_stored:
                 raise QCError(
@@ -1227,23 +1223,19 @@ class QCStore:
                     "confirmed submission with a corrected segmentation file takes an editor, in 3D Slicer."
                 )
             _check_label_names([*(confirmed_labels or []), *rejected, *missing])
-            wrong = sorted({reason for reason in rejected.values() if reason not in REJECT_REASONS})
-            if wrong:
-                raise QCError(f"Unknown reasons to reject a label: {wrong}. Give one of {sorted(REJECT_REASONS)}.")
             already = sorted(name for name in missing if name in painted)
-            already += sorted(name for name, reason in rejected.items() if reason == workflow.MISSING and name in painted)
             if already:
                 raise QCError(
-                    f"These labels are in the segmentation of {key} already: {already}. Reject them if they need "
-                    "correcting; 'missing' is for bones the segmentation lacks."
+                    f"These labels are in the segmentation of {key} already: {already}. Reject them if something "
+                    "is wrong with them; 'missing' is for bones the segmentation lacks."
                 )
-            not_there = sorted(name for name, reason in rejected.items() if reason != workflow.MISSING and name not in painted)
+            not_there = sorted(name for name in rejected if name not in painted)
             if not_there:
                 raise QCError(
                     f"These rejected labels are not in the segmentation of {key}: {not_there}. Report a bone the "
                     "segmentation lacks as missing."
                 )
-            rejected = {**rejected, **{name: workflow.MISSING for name in missing}}
+            rejected = sorted({*rejected, *missing})
             if confirmed_labels is None:
                 # Accepting "the subject" accepts what is under review, not what the dataset has
                 # as reviewed already.
@@ -1322,11 +1314,8 @@ class QCStore:
         verdict = []
         if details["accepted"]:
             verdict.append(f"accepted {', '.join(details['accepted'])}")
-        rejected_painted = {name: why for name, why in details["rejected"].items() if why != workflow.MISSING}
-        if rejected_painted:
-            verdict.append(
-                "rejected " + ", ".join(f"{name} ({REJECT_REASONS[why]})" for name, why in rejected_painted.items())
-            )
+        if details["rejected"]:
+            verdict.append(f"rejected {', '.join(details['rejected'])}")
         if details["missing"]:
             verdict.append(f"reported missing {', '.join(details['missing'])}")
         self._record_submission(
@@ -1930,7 +1919,7 @@ class SubmissionOutcome:
     case: Case
     message: str
     accepted_labels: list[str] = field(default_factory=list)
-    rejected_labels: dict[str, str] = field(default_factory=dict)
+    rejected_labels: list[str] = field(default_factory=list)
     missing_labels: list[str] = field(default_factory=list)
     edited_labels: list[str] = field(default_factory=list)
     removed_labels: list[str] = field(default_factory=list)
@@ -1997,7 +1986,7 @@ def _not_accepted_text(case: Case) -> str:
         if label.state == workflow.PENDING:
             parts.append(f"{name} (waiting for a reviewer)")
         elif label.state == workflow.REJECTED:
-            what = REJECT_REASONS.get(label.reason or "", "rejected") if label.painted else "reported missing"
+            what = "rejected" if label.painted else "reported missing"
             parts.append(f"{name} ({what}, by '{label.by}')")
     return ", ".join(parts)
 
@@ -2006,9 +1995,8 @@ def _review_message(case: Case, details: dict) -> str:
     """What a reviewer is told after their verdict."""
     if case.stage == workflow.EDIT:
         parts = []
-        rejected = len(details["rejected"]) - len(details["missing"])
-        if rejected:
-            parts.append(f"{rejected} label(s) rejected")
+        if details["rejected"]:
+            parts.append(f"{len(details['rejected'])} label(s) rejected")
         if details["missing"]:
             parts.append(f"{len(details['missing'])} reported missing")
         return (

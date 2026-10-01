@@ -82,7 +82,7 @@ class LiveServerTestCase(QCTestCase):
         handout = client.next_subject()
         return client.submit(
             handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True,
-            rejected_labels={"FEMUR_RIGHT": "quality"},
+            rejected_labels=["FEMUR_RIGHT"],
         )
 
 
@@ -275,9 +275,9 @@ class WhatTheClientSendsTests(unittest.TestCase):
     def test_a_reviewer_sends_the_verdict_on_each_label(self):
         sent = self.sent(
             quality_check_confirmed=True, use_stored_segmentation=True,
-            rejected_labels={"FEMUR_RIGHT": "absent"}, missing_labels=["TIBIA_LEFT"],
+            rejected_labels=["FEMUR_RIGHT"], missing_labels=["TIBIA_LEFT"],
         )
-        self.assertEqual(sent["rejected_labels"], {"FEMUR_RIGHT": "absent"})
+        self.assertEqual(sent["rejected_labels"], ["FEMUR_RIGHT"])
         self.assertEqual(sent["missing_labels"], ["TIBIA_LEFT"])
         self.assertTrue(sent["use_stored_segmentation"])
 

@@ -43,7 +43,7 @@ class EditorTestCase(QCTestCase):
         self.rita = self.store.create_user("rita", roles=[REVIEWER])[0]
         self.alice = self.store.create_user("alice", roles=[EDITOR])[0]
         self.bob = self.store.create_user("bob", roles=[EDITOR])[0]
-        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
         self.assignment = self.store.next_subject(self.alice, EDITOR)
         self.before = self.dataset_state()
         self.staged = self.state_dir / "staged" / "Dataset_001" / f"{KEY}.seg.nrrd"
@@ -81,7 +81,7 @@ class StagedCorrectionTests(EditorTestCase):
 
     def test_a_second_correction_replaces_the_first(self):
         self.submit(self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"]))
-        self.review(self.store, self.rita, rejected={"TIBIA_LEFT": "absent"})
+        self.review(self.store, self.rita, rejected=["TIBIA_LEFT"])
         outcome = self.edit(self.store, self.bob, ["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.assertEqual(outcome.removed_labels, ["TIBIA_LEFT"])
         self.assertEqual(labels_in_mask(self.staged), {"FEMUR_LEFT", "FEMUR_RIGHT"})
@@ -383,7 +383,7 @@ class PartialUploadTests(QCTestCase):
         store = self.make_store(**config)
         rita = store.create_user("rita", roles=[REVIEWER])[0]
         eddie = store.create_user("eddie", roles=[EDITOR])[0]
-        self.review(store, rita, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(store, rita, rejected=["FEMUR_RIGHT"])
         self.edit(store, eddie, ["FEMUR_LEFT"])
         return store, rita
 
@@ -432,10 +432,10 @@ class AuditTrailTests(QCTestCase):
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     def test_a_verdict_is_logged_in_the_state_folder_and_not_next_to_the_dataset(self):
-        self.review(self.store, self.alice, rejected={"FEMUR_RIGHT": "quality"}, comment="head cut off")
+        self.review(self.store, self.alice, rejected=["FEMUR_RIGHT"], comment="head cut off")
         log = (self.state_dir / "server.log").read_text(encoding="utf-8")
         self.assertIn(f"Subject {KEY} reviewed by 'alice'", log)
-        self.assertIn("FEMUR_RIGHT (needs correction)", log)
+        self.assertIn("accepted FEMUR_LEFT; rejected FEMUR_RIGHT.", log)
         self.assertIn("head cut off", log)
         self.assertFalse(self.builder.dataset_log(1).exists())
 
@@ -448,14 +448,14 @@ class AuditTrailTests(QCTestCase):
         self.assertIn("alice", log)
 
     def test_the_machine_readable_trail_records_the_verdict(self):
-        self.review(self.store, self.alice, rejected={"FEMUR_RIGHT": "absent"})
+        self.review(self.store, self.alice, rejected=["FEMUR_RIGHT"])
         entries = [e for e in self.submissions() if e["kind"] == "submission"]
         self.assertEqual(len(entries), 1)
         entry = entries[0]
         self.assertEqual((entry["user"], entry["role"], entry["subject_key"]), ("alice", REVIEWER, KEY))
         self.assertTrue(entry["quality_check_confirmed"])
         self.assertEqual(entry["accepted_labels"], ["FEMUR_LEFT"])
-        self.assertEqual(entry["rejected_labels"], {"FEMUR_RIGHT": "absent"})
+        self.assertEqual(entry["rejected_labels"], ["FEMUR_RIGHT"])
         self.assertEqual(entry["stage"], "edit")
         self.assertIn("timestamp", entry)
 
@@ -468,7 +468,7 @@ class AuditTrailTests(QCTestCase):
         self.assertIn("released", [entry["kind"] for entry in self.submissions()])
 
     def test_the_trail_reads_back_newest_first_and_can_be_filtered(self):
-        self.review(self.store, self.alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.store, self.alice, rejected=["FEMUR_RIGHT"])
         self.review(self.store, self.alice)
         recent = self.store.audit.read_recent(limit=10, kind="submission")
         self.assertEqual(len(recent), 2)

@@ -186,7 +186,7 @@ class StatsTests(QCTestCase):
         self.assertEqual(store.stats().assigned, 0)
 
         self.review(store, alice)  # subject 1 waits for approval
-        self.review(store, bob, rejected={"FEMUR_LEFT": "quality"})  # subject 2 for an editor
+        self.review(store, bob, rejected=["FEMUR_LEFT"])  # subject 2 for an editor
         store.next_subject(alice, REVIEWER)  # subject 3 is out
 
         stats = store.stats()

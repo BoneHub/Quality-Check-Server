@@ -131,7 +131,7 @@ class AdminUserManagementTests(ApiTestCase):
         )
 
     def test_the_user_list_shows_progress_per_user(self):
-        self.judge(self.alice_key, rejected_labels={"FEMUR_RIGHT": "quality"})
+        self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"])
         self.next_subject(self.bob_key, "editor")
 
         listed = {u["name"]: u for u in self.client.get("/admin/api/users", headers=self.admin_headers).json()}

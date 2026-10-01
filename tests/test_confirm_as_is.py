@@ -153,7 +153,7 @@ class ConfirmStoredRefusalTests(QCTestCase):
         store, alice, assignment = self.open()
         outcome = store.submit(
             assignment.assignment_id, alice, True, None, use_stored_segmentation=True,
-            rejected_labels={"FEMUR_LEFT": "quality"}, comment="off the image's grid",
+            rejected_labels=["FEMUR_LEFT"], comment="off the image's grid",
         )
         self.assertEqual(outcome.stage, "edit")
 
@@ -218,7 +218,7 @@ class DataAccessVerdictTests(QCTestCase):
         """They would be overwriting labels they have never seen, and marking them absent."""
         store = self.make_store()
         alice = store.create_user("alice")[0]
-        self.review(store, alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(store, alice, rejected=["FEMUR_RIGHT"])
         assignment = store.next_subject(alice, EDITOR)
         alice = store.update_user("alice", data_access="image")
         with self.assertRaises(QCError) as ctx:
@@ -260,17 +260,12 @@ class ConfirmOverHttpTests(ApiTestCase):
         self.assertIsNone(handout["stored_segmentation_issue"])
         response = self.submit_stored(
             self.alice_key, handout["assignment_id"], confirmed_labels=["FEMUR_LEFT"],
-            rejected_labels={"FEMUR_RIGHT": "absent"},
+            rejected_labels=["FEMUR_RIGHT"],
         )
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        self.assertEqual((body["accepted_labels"], body["rejected_labels"]), (["FEMUR_LEFT"], {"FEMUR_RIGHT": "absent"}))
+        self.assertEqual((body["accepted_labels"], body["rejected_labels"]), (["FEMUR_LEFT"], ["FEMUR_RIGHT"]))
         self.assertEqual(body["stage"], "edit")
-
-    def test_an_unknown_reason_is_refused_by_the_api(self):
-        handout = self.next_subject(self.alice_key, REVIEWER)
-        response = self.submit_stored(self.alice_key, handout["assignment_id"], rejected_labels={"FEMUR_RIGHT": "ugly"})
-        self.assertEqual(response.status_code, 400)
 
     def test_the_handout_warns_about_a_segmentation_off_its_grid(self):
         write_shifted_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT", "FEMUR_RIGHT"], 0.4)

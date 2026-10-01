@@ -69,10 +69,10 @@ own correction.
    APPROVED: written into the dataset
 ```
 
-1. **A reviewer judges the subject.** Each label is accepted, or rejected because it *needs
-   correction* or *should not be there*. Bones the segmentation lacks are reported *missing*.
-2. **If anything is rejected or missing, an editor corrects it** in 3D Slicer and uploads the
-   corrected segmentation.
+1. **A reviewer judges the subject.** Each label is accepted or rejected. Bones the
+   segmentation lacks are reported *missing*.
+2. **If anything is rejected or missing, an editor corrects it** in 3D Slicer, deciding for
+   each rejected label whether to fix it or take it out, and uploads the corrected segmentation.
 3. **A reviewer checks the correction.** The review page shows the editor's version. You can
    switch this step off: see [Should corrections go back to a reviewer?](#should-corrections-go-back-to-a-reviewer)
 4. **You approve the subject** in the admin panel. Only then does the server update
@@ -514,7 +514,7 @@ change at once.
 | --- | --- |
 | to review | waits for a reviewer: never reviewed, or an editor changed it |
 | accepted | a reviewer accepted it, or the editor vouched for it when corrections need no review |
-| rejected | a reviewer rejected it: it *needs correction*, *should not be there*, or *is missing* |
+| rejected | a reviewer rejected it, for an editor to correct or take out, or reported it missing |
 | removed | no longer in the segmentation. Becomes `0` on approval |
 | kept | already reviewed in the dataset (status `2`) and not under review. Left as it is |
 
@@ -527,9 +527,8 @@ The server compares the correction with the segmentation it replaces, voxel by v
   and the editor ticked them.
 - **Labels the editor did not touch** keep their verdict. If a correction spills into an
   accepted neighbouring bone, that neighbour loses its acceptance and is reviewed again.
-- **Labels the editor deleted** are removed. If a reviewer said the label should not be there,
-  the removal is final. Otherwise a reviewer must agree first, when corrections need review.
-  The reviewer agrees by accepting the removal, and undoes it by reporting the bone missing.
+- **Labels the editor deleted** are removed. When corrections need review, a reviewer must
+  agree first: they agree by accepting the removal, and undo it by reporting the bone missing.
 - **A bone reported missing that the editor did not add** goes back to a reviewer, when
   corrections need review, so the reviewer sees the editor disagreed.
 
@@ -797,11 +796,12 @@ segmentations. A reviewer:
    the slices show the voxels as they are. Clicking a label moves to that bone; the eye icon
    hides it; the target shows it alone. **Outline**, **Distinct colours**, a CT window and a
    single-plane view help with details;
-4. gives each label a verdict: ✓ accepts it, ✗ rejects it with a reason (*needs correction* or
-   *should not be there*). Every label starts without a verdict, and every label under
-   review needs one before the verdict can be sent. **A bone the segmentation lacks**
-   reports a missing bone. A comment explains what is wrong, and records anything else worth
-   knowing, such as an implant: you can find subjects by what their comments say;
+4. gives each label a verdict: ✓ accepts it, ✗ rejects it, whatever is wrong with it: the
+   editor decides whether to correct it or take it out. Every label starts without a verdict,
+   and every label under review needs one before the verdict can be sent. **A bone the
+   segmentation lacks** reports a missing bone. A comment explains what is wrong, and records
+   anything else worth knowing, such as an implant: you can find subjects by what their
+   comments say;
 5. presses **Accept** (or **Send to editors**, when something is rejected or missing),
    **Reject subject** (rejects every label under review), or **Release** (hands it back; the
    reviewer is offered it again only once nothing else is waiting for them).
@@ -882,7 +882,7 @@ same sequence:
 1. `GET /api/v1/ping`: checks the key and its role. Reports the server's `schema_version`, the
    user's `roles`, the `role` of this request, the user's `data_access`, and whether corrections
    go back to a reviewer (`edits_need_review`)
-2. `GET /api/v1/labels`: the label map, the label statuses and the reasons to reject a label
+2. `GET /api/v1/labels`: the label map and the label statuses
 3. `POST /api/v1/subjects/next`: leases the next subject for this role
 4. `GET /api/v1/assignments/{id}/image`: downloads the image (`.nii.gz`)
 5. `GET /api/v1/assignments/{id}/segmentation`: downloads the segmentation under review
@@ -890,8 +890,8 @@ same sequence:
 6. `POST /api/v1/assignments/{id}/submit`: sends the verdict, as multipart with a `metadata`
    part:
    - a reviewer: `quality_check_confirmed: true`, `use_stored_segmentation: true`,
-     `confirmed_labels` (accepted), `rejected_labels` (label → `quality`, `absent`, or
-     `missing` for one not in the segmentation), `missing_labels`, `comment`. No file.
+     `confirmed_labels` (accepted), `rejected_labels` (rejected, of the labels in the
+     segmentation), `missing_labels` (bones the segmentation lacks), `comment`. No file.
      `quality_check_confirmed: false` rejects every label under review;
    - an editor: `quality_check_confirmed: true`, the corrected `.seg.nrrd` as the
      `segmentation` part, `confirmed_labels` (vouched for; omitted, every label in the upload
@@ -906,8 +906,9 @@ same sequence:
 The handout says what there is for this user to download (`has_image`, `has_segmentation`, and
 a URL for each), which follows their `data_access`, and whether the segmentation is an editor's
 correction (`segmentation_source`). It carries the subject's `stage`, every label with its
-state, reason and who gave it (`labels`), open requests from the administrator (`requests`),
-and the subject's quality check so far with its comments (`history`). With the segmentation it
+state, whether it is painted, and who gave it the state (`labels`), open requests from the
+administrator (`requests`), and the subject's quality check so far with its comments
+(`history`). With the segmentation it
 also carries `segments`, read from the file header: each segment's number, BoneHub label and
 value, colour and bounding box. `stored_segmentation_issue` says why the segmentation cannot be
 accepted as it is, if there is a reason.
@@ -938,7 +939,7 @@ editor.submit(handout["assignment_id"], quality_check_confirmed=True,
 reviewer = BoneHubQCClient("http://localhost:8000", "bhqc_...", role="reviewer")
 handout = reviewer.next_subject()
 reviewer.submit(handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True,
-                confirmed_labels=["FEMUR_LEFT"], rejected_labels={"FEMUR_RIGHT": "quality"})
+                confirmed_labels=["FEMUR_LEFT"], rejected_labels=["FEMUR_RIGHT"])
 ```
 
 ### Updating NiiVue

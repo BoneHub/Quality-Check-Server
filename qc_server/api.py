@@ -40,7 +40,6 @@ from . import __version__
 from .models import (
     DATA_ACCESS_DESCRIPTIONS,
     EDITOR,
-    REJECT_REASONS,
     ROLES,
     Assignment,
     HandoutLabel,
@@ -117,7 +116,6 @@ def labels(user: User = Depends(get_user)) -> dict:
         "schema_version": SCHEMA_VERSION,
         "label_name_to_value": LABEL_NAME_TO_VALUE,
         "label_status_values": {str(k): v for k, v in VALID_LABEL_VALUES.items()},
-        "reject_reasons": REJECT_REASONS,
         "segmentation_suffix": SEGMENTATION_SUFFIX,
     }
 
@@ -320,7 +318,6 @@ def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHando
                 dataset_status=segmentation_labels.get(name),
                 state=label.state,
                 painted=label.painted,
-                reason=label.reason,
                 by=label.by,
                 edited_by=label.edited_by,
             )

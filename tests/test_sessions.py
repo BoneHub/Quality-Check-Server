@@ -50,7 +50,7 @@ class CredentialsOffTheShareTests(QCTestCase):
     def test_no_credential_file_ever_reaches_the_share(self):
         store = self.make_store()
         alice, _api_key = store.create_user("alice")
-        self.review(store, alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(store, alice, rejected=["FEMUR_RIGHT"])
         self.edit(store, alice, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
         store.create_user("bob")
         self.review(store, store._users["bob"])
@@ -148,7 +148,7 @@ class ServerSessionTests(QCTestCase):
 
     def test_a_subject_in_progress_on_one_server_is_not_handed_out_by_the_other(self):
         """Its verdicts wait for the first server's administrator; the dataset does not show them yet."""
-        self.review(self.first, self.alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.first, self.alice, rejected=["FEMUR_RIGHT"])
         self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000002")
         self.assertEqual(self.second.stats().assigned_by_other_servers, 1)
 
@@ -160,7 +160,7 @@ class ServerSessionTests(QCTestCase):
         self.assertEqual(self.second.stats().eligible_subjects, 2, "the dataset says it is reviewed")
 
     def test_a_subject_closed_on_one_server_is_free_for_the_other(self):
-        self.review(self.first, self.alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.review(self.first, self.alice, rejected=["FEMUR_RIGHT"])
         self.first.close_case("001_000001")
         self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000001")
 
