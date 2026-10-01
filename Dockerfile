@@ -11,9 +11,11 @@
 #
 # Two mounts:
 #   /data                 the dataset, read-write. The server keeps its non-secret state
-#                         in /data/.bonehub_qc/<server id>/.
+#                         in /data/.bonehub_qc/<server id>/. A reliability study server
+#                         (BONEHUB_QC_MODE=study) only reads it, and can mount it read-only.
 #   /var/lib/bonehub-qc   the server's credentials: its id, private key, admin key and
-#                         user accounts. A volume on the Docker host, never the share.
+#                         user accounts. A volume on the Docker host, never the share. A
+#                         study server keeps its study there too, under state/<server id>/.
 
 FROM python:3.11-slim
 

@@ -34,8 +34,10 @@ services:
       # Mounted read-write: the server keeps its non-secret state -- the verdicts and the
       # corrected segmentations waiting for approval among it -- in .bonehub_qc/<server id>/,
       # and writes what the administrator approves into the segmentations, Subject_info
-      # files and quality-check logs of the dataset.
-      - "${BONEHUB_DATASET_PATH:-dataset}:/data"
+      # files and quality-check logs of the dataset. A reliability study server
+      # (BONEHUB_QC_MODE=study) writes nothing there: BONEHUB_DATASET_ACCESS=ro in its .env
+      # mounts the dataset read-only.
+      - "${BONEHUB_DATASET_PATH:-dataset}:/data:${BONEHUB_DATASET_ACCESS:-rw}"
       # The server's credentials -- its id, private key, admin key and user accounts --
       # stay here, on the Docker host, never with the dataset. This volume IS the server:
       # removing it (docker compose down -v) creates a new server on the next start, with a
@@ -51,6 +53,9 @@ services:
       # in the credentials volume. The generated admin key is printed once, at that start.
       BONEHUB_QC_ADMIN_KEY: "${BONEHUB_QC_ADMIN_KEY:-}"
       BONEHUB_QC_PRIVATE_KEY: "${BONEHUB_QC_PRIVATE_KEY:-}"
+      # What the server is for: blank for the quality check, "study" for a reliability study
+      # of the reviewers, which keeps everything in the credentials volume.
+      BONEHUB_QC_MODE: "${BONEHUB_QC_MODE:-}"
       # Policy: every setting of the admin panel's Policy section, and the datasets. Anything
       # in QCServerConfig can be set as BONEHUB_QC_<FIELD>, but only the names listed here
       # reach the container. A value set here wins over the admin panel at every start;

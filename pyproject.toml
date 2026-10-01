@@ -15,7 +15,8 @@ authors = [
 # Only the data schema is taken from BoneHub-Dataset, with its [io] extra (numpy and
 # SimpleITK) for reading and writing .seg.nrrd segmentations; none of the conversion or
 # segmentation stack is pulled in. The server is written for schema 0.3 and refuses to
-# start with another (see config.WRITTEN_FOR_SCHEMA).
+# start with another (see config.WRITTEN_FOR_SCHEMA). matplotlib draws the figures of a
+# reliability study's report (qc_server.study.report).
 dependencies = [
     "bonehub-dataset[io] @ git+https://github.com/BoneHub/BoneHub-Dataset.git",
     "fastapi>=0.110",
@@ -24,6 +25,7 @@ dependencies = [
     "pydantic>=2.0",
     "numpy>=1.24",
     "SimpleITK>=2.2",
+    "matplotlib>=3.7",
 ]
 
 [project.optional-dependencies]

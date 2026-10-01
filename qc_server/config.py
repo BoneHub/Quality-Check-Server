@@ -11,6 +11,10 @@ Two places, on purpose:
 
 Any config field can be overridden at startup through an environment variable named
 ``BONEHUB_QC_<FIELD>``, which is how the Docker image is configured.
+
+A server in study mode (``BONEHUB_QC_MODE=study``, see :mod:`qc_server.study`) writes nothing
+into the dataset: what it keeps besides its credentials goes into the credentials folder too,
+under ``state/<server_id>/``.
 """
 
 from __future__ import annotations
@@ -32,6 +36,16 @@ CONFIG_FILE_NAME = "config.json"
 #: Settings an older server saved in ``config.json`` that no longer exist. They are dropped on
 #: loading, so a server updated in place still starts.
 RETIRED_FIELDS = ("max_concurrent_assignments_per_user",)
+
+#: What the server is for, from ``BONEHUB_QC_MODE``: the quality check of the dataset, or a
+#: reliability study of the reviewers, which runs on a server of its own.
+QC_MODE = "qc"
+STUDY_MODE = "study"
+MODES = (QC_MODE, STUDY_MODE)
+
+#: In study mode, the folder of the credentials folder that holds one sub-folder per server, in
+#: place of ``<dataset_root>/.bonehub_qc``: a study server leaves the dataset alone.
+STUDY_STATE_DIR_NAME = "state"
 
 #: The schema whose label statuses and segmentation format this server implements. The
 #: schema is installed from its repository's main branch, so a newer one must stop the
@@ -205,3 +219,22 @@ def resolve_state_root(dataset_root: Path) -> Path:
 def resolve_credentials_dir() -> Path:
     """Folder inside the container for the server's credentials, from ``BONEHUB_QC_CREDENTIALS_DIR``."""
     return Path(os.environ.get(f"{ENV_PREFIX}CREDENTIALS_DIR") or DEFAULT_CREDENTIALS_DIR)
+
+
+def resolve_mode() -> str:
+    """What the server is for, from ``BONEHUB_QC_MODE``: 'qc' (the default) or 'study'."""
+    mode = (os.environ.get(f"{ENV_PREFIX}MODE") or QC_MODE).strip().lower()
+    if mode not in MODES:
+        raise RuntimeError(
+            f"{ENV_PREFIX}MODE is '{mode}'. Leave it blank for the quality check, or set it to '{STUDY_MODE}' "
+            "for a reliability study of the reviewers."
+        )
+    return mode
+
+
+def resolve_server_state_root(dataset_root: Path, credentials_dir: Path) -> Path:
+    """The folder that holds one sub-folder per server: in the dataset for the quality check, in
+    the credentials folder for a study server, which writes nothing into the dataset."""
+    if resolve_mode() == STUDY_MODE:
+        return Path(credentials_dir) / STUDY_STATE_DIR_NAME
+    return resolve_state_root(dataset_root)

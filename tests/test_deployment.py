@@ -36,6 +36,7 @@ NON_CONFIG_ENV_NAMES = {
     "ADMIN_KEY",
     "PRIVATE_KEY",
     "TIMEZONE",  # read by Compose alone, which passes it to the container as TZ
+    "MODE",  # the quality check, or a reliability study server (qc_server.study)
 }
 
 

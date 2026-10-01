@@ -35,6 +35,7 @@ local disk or an SMB share.
 - [Where the server keeps things](#where-the-server-keeps-things)
 - [Troubleshooting](#troubleshooting)
 - [What reviewers and editors see](#what-reviewers-and-editors-see)
+- [Reliability study](#reliability-study)
 - [For developers](#for-developers)
 
 ## How it works
@@ -835,6 +836,138 @@ whose README covers installing and using it. In short, an editor:
 When [corrections need no review](#should-corrections-go-back-to-a-reviewer), each label has a
 tick box: ticked labels are accepted on the editor's word.
 
+## Reliability study
+
+How far can you trust the reviewers' verdicts? A reliability study measures it. The same
+subjects go to several reviewers, the *raters*, each of them more than once, and the server
+measures how far their verdicts agree:
+
+- **intra-rater reliability**: does a rater give a bone the same verdict when they read it again?
+- **inter-rater reliability**: do different raters give a bone the same verdict?
+
+The study runs on a server of its own, a *study server*, apart from the quality check. It has
+users of its own and never writes into the dataset, and a quality-check server on the same
+dataset never sees it. Its reports name the raters by codes only.
+
+### Start a study server
+
+1. Copy this project folder, as for [another server on this computer](#another-server-on-this-computer).
+2. In the copy's `.env`, set:
+
+   | Variable | Value |
+   | --- | --- |
+   | `COMPOSE_PROJECT_NAME` | a name of its own, e.g. `bonehub_qc_study` |
+   | `BONEHUB_QC_PORT` | a free port, e.g. `8001` |
+   | `BONEHUB_QC_MODE` | `study` |
+   | `BONEHUB_DATASET_ACCESS` | `ro`: the dataset is mounted read-only |
+   | `BONEHUB_DATASET_PATH` or `BONEHUB_DATASET_SHARE` | the dataset, as for the quality-check server |
+
+3. Run `docker compose up -d --build` in the copy, and print its admin key with
+   `docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key`.
+4. Open `http://<host>:8001/admin`. The panel shows **Study**, **Create user**, **Users** and
+   **Recent activity**.
+5. Create a user for each rater and send them their invite link,
+   `http://<host>:8001/review#key=...`. A rater must be sent the image and the segmentation.
+   These users are the study server's own: a key of the quality-check server does not work here.
+
+The study server keeps everything (its users, the study, the readings, and copies of the
+study's segmentations) in its credentials volume, under `state/<server id>/`. Run in its
+folder, `docker compose down -v` wipes it completely, and leaves the quality check untouched.
+
+### Set up the study
+
+Under **Study**:
+
+| Setting | What it does |
+| --- | --- |
+| Name | Names the study in the report |
+| Subjects | **A random pick**: how many, and from which datasets (blank: all). **A list I type**: subject ids, e.g. `001_000003, 2_45` |
+| Seed | Fixes the random pick, the raters' codes, each rater's order and the confidence intervals. **Pick one** fills in a random number. The report records it |
+| Raters | The users who read the subjects. Only active reviewers sent the image and the segmentation can be raters |
+| Readings per rater | How many times each rater reads each subject. 2 or more measures intra-rater reliability; with 1, only inter-rater reliability is measured |
+| Minimum gap | At least this many other readings between a rater's two readings of one subject. Blank: half the number of subjects. At most the number of subjects minus 1 |
+| Show subject ids to raters | Off by default: raters see "Reading 7" instead of the subject id, so they cannot recognise a repeat by its number |
+| Bootstrap samples | How many resamples of the subjects each 95% interval is computed from. Default 2000 |
+
+A study subject needs an image, and a segmentation on the image's voxel grid that holds at
+least one bone. A random pick leaves out the others. A typed list that contains one is refused,
+saying why.
+
+**Preview** saves the settings as a draft and shows what they make of the study: the subjects,
+each rater's code, and how many readings each rater does. **Start study…** fixes the settings,
+copies the subjects' segmentations into the study server's own folder, and gives each rater a
+code and their list of readings. Every reading of a subject sees that same copy, whatever
+happens to the dataset meanwhile.
+
+Each rater reads the subjects in rounds: every subject once per round, in a random order of
+their own. A shuffle could put a subject at the end of one round and the start of the next, and
+the rater would remember their first verdict; the minimum gap prevents that. With 4 subjects, 2
+readings each and a gap of 2:
+
+```
+round 1: 3 1 4 2 | round 2: 1 3 2 4     subject 2: readings 4 and 7, 2 others in between
+```
+
+The readings in between are of the study's other subjects. There are no dummy subjects.
+
+### While the study runs
+
+- Raters open their invite link and press **Get next subject**. The page says it is a reliability
+  study, and shows their code ("Rater C") and how far they are ("reading 7 of 40").
+- **Every reading is blind**: no history and no other verdict. Nothing from `Subject_info` is
+  shown, not even which bones it lists as reviewed. The subject id is shown only if the study
+  shows it.
+- **Every bone gets one verdict**, accept or reject. There is no missing-bone report and no
+  **Reject subject**. The comment is optional; it goes into `readings.csv`, not into the numbers.
+- A rater holds one reading at a time, the next in their list. Several raters can read the same
+  subject at the same time. A reading has no lease time. **Release** hands it back, but it stays
+  the rater's next reading: readings cannot be skipped.
+- The panel's **Progress** shows each rater's code, name and readings done. **Recent activity**
+  lists each reading.
+- **End study…** stops handing out readings. A reading open at that moment is not recorded.
+
+### Results
+
+**View report** opens the report in a new tab, and **Download results (.zip)** saves it with
+everything else. Both work while the study runs; the report then says its results are
+provisional.
+
+| File | What it holds |
+| --- | --- |
+| `report.html` | The settings, how complete each rater's readings are, the figures, and a table of the numbers beside each. One self-contained page, to share with the raters |
+| `figures/figure1_intra_rater.svg`, `.png` | Intra-rater reliability per rater: % agreement, α and AC1, with 95% intervals |
+| `figures/figure2_inter_rater_pairs.svg`, `.png` | α of each pair of raters, with their % agreement. Three raters or more |
+| `figures/figure3_inter_rater_group.svg`, `.png` | Inter-rater reliability of each pair and of all raters together, with 95% intervals |
+| `readings.csv` | One row per bone per reading: rater code, subject, reading number, position in the rater's list, bone, verdict, times and comment |
+| `results.csv` | Every number of the report, with its interval |
+
+**The measures.** An *item* is a bone of a study subject. Intra-rater reliability compares a
+rater's readings of an item; inter-rater reliability compares the raters' first readings of it.
+
+- **% agreement**: per item, the share of pairs of verdicts that agree, averaged over the items
+  (Gwet's p<sub>a</sub>). With two readings, the share of items given the same verdict twice.
+- **Krippendorff's α**: agreement corrected for chance; 1 is perfect, 0 is chance. Undefined when
+  every verdict is the same.
+- **Gwet's AC1**: agreement corrected for chance in a way that stays meaningful when one verdict
+  is rare. Rejects usually are, and then α, like Cohen's κ, can be low although the raters nearly
+  always agree: with 5% of bones rejected and 93% agreement, α ≈ 0.26 but AC1 ≈ 0.92. Report both.
+- **95% intervals**: a percentile bootstrap that resamples whole subjects, since the bones of one
+  subject are not independent, drawn with the study's seed. The same readings always give the
+  same numbers.
+
+**Anonymity.** The raters' codes are handed out in a random order drawn from the seed. The report
+and the CSV files name nobody: only the admin panel shows which code is whom, and each rater
+sees their own code only. A comment is the rater's own words, and goes into `readings.csv` as
+written.
+
+**A limitation to report.** When a rater reads a subject twice on one day, they may remember
+their first verdict, which makes them look more consistent than they are. The gap, the random
+order and hidden subject ids reduce this; they do not remove it.
+
+**Another study.** **Delete study…** removes the study, its readings and its copies; download the
+results first. Its settings stay in the form, to start the next study from. A study server holds
+one study at a time.
+
 ## For developers
 
 ### Dataset format
@@ -872,6 +1005,11 @@ segmentation paints it while `Subject_info` lists it as not available, or not at
 | `/api/v1/...` | Client API, authenticated with `X-API-Key`, in the role named by `X-Client-Role` |
 | `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals. `cases?comment=` finds subjects by their comments, and `POST cases/approve` takes `subject_keys`, a `remark`, `allow_unaccepted` and the `revisions` the subjects were listed at |
 | `/static/...` | The pages' scripts and the vendored NiiVue viewer |
+
+A [study server](#reliability-study) answers the review page at the same `/api/v1` paths, with
+study readings, and turns 3D Slicer away. Its admin API is `/admin/api/study`: `GET` the study
+and each rater's progress, `POST preview`, `start` and `end`, `DELETE` it, and `GET report` and
+`results` (the zip). The code is in `qc_server/study/`.
 
 ### Client flow
 
@@ -991,6 +1129,9 @@ To run one module or one test, replace the last command, for example with
 | `test_cli.py` | `bonehub-qc-server` commands |
 | `test_concurrency.py` | Several users hitting the server at once, and other users answered while one submission is checked or an approval is written |
 | `test_deployment.py` | Start-up from environment variables only, the credentials volume, the shipped docker files, and — where the docker CLI is at hand — what Compose makes of a local dataset folder or a share |
+| `test_study.py` | A reliability study server over HTTP: setting up and checking subjects and raters, blind readings, one verdict per bone, ending and deleting, the dataset and the quality check left alone, and results that name no rater |
+| `test_study_schedule.py` | What a study's seed draws: the subjects picked, the raters' codes, and each rater's list with its gap |
+| `test_study_reliability.py` | % agreement, Krippendorff's α and Gwet's AC1 against their published worked examples, and their bootstrap intervals |
 
 `tests/support.py` holds the dataset builder, the base test case, and one-line steps of the
 workflow (`review`, `edit`).

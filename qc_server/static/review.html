@@ -228,6 +228,10 @@
   dialog .body ul { margin: 4px 0 8px; padding-left: 18px; max-height: 160px; overflow-y: auto; font-size: 12px; }
   dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
+  /* On a study server (see qc_server.study) the page shows a study reading: no history, no lease, and a verdict on
+     every bone, accept or reject, and nothing else. */
+  body.study .qc-only, body:not(.study) .study-only { display: none !important; }
+
   @media (max-width: 900px) {
     .workspace { grid-template-columns: 1fr; grid-template-rows: 62vh auto; overflow-y: auto; }
     .sidebar { border-left: none; border-top: 1px solid var(--border); overflow: visible; }
@@ -265,8 +269,9 @@
   <header class="topbar">
     <img class="logo" src="/static/logo.svg" alt="">
     <span class="brand">BoneHub Quality Check</span>
-    <span class="muted">Review</span>
+    <span class="muted" id="pageKind">Review</span>
     <span class="spacer"></span>
+    <span id="studyProgress" class="muted study-only"></span>
     <span id="whoName" class="muted"></span>
     <span id="whoAccess" class="pill"></span>
     <button class="small" id="signOutBtn">Sign out</button>
@@ -345,12 +350,12 @@
         <div class="card-head"><h2>Subject</h2></div>
         <div class="subject-key mono" id="subjectKey"></div>
         <div class="facts" id="subjectFacts"></div>
-        <div class="lease">
+        <div class="lease qc-only">
           <span id="leaseText"></span>
           <button class="small" id="extendBtn" title="Keep this subject for another lease period">Extend</button>
         </div>
         <div id="subjectNotes"></div>
-        <ul class="history" id="historyList" hidden></ul>
+        <ul class="history qc-only" id="historyList" hidden></ul>
       </section>
 
       <section class="card" id="labelsCard" hidden>
@@ -361,7 +366,7 @@
         </div>
         <div class="labels" id="labelsList"></div>
         <div class="labels-foot muted" id="labelsFoot"></div>
-        <div class="missing" id="missingBox">
+        <div class="missing qc-only" id="missingBox">
           <label class="field" for="missingInput">A bone the segmentation lacks</label>
           <div class="row">
             <input id="missingInput" list="labelNames" placeholder="Label name, e.g. TIBIA_LEFT" autocomplete="off" spellcheck="false">
@@ -378,11 +383,15 @@
         <textarea id="comment" placeholder="What is wrong, or anything worth recording" maxlength="4000"></textarea>
         <div class="actions">
           <button class="primary" id="confirmBtn">Submit verdict</button>
-          <button class="danger" id="rejectBtn" title="Reject every label under review: the subject goes to the editors">Reject subject</button>
+          <button class="danger qc-only" id="rejectBtn" title="Reject every label under review: the subject goes to the editors">Reject subject</button>
           <button id="releaseBtn" title="Give the subject back without a verdict">Release</button>
         </div>
-        <p class="muted" style="font-size:12px;margin:8px 0 0">
+        <p class="muted qc-only" style="font-size:12px;margin:8px 0 0">
           Your verdict waits on the server. Nothing is written into the dataset until the administrator approves the subject.
+        </p>
+        <p class="muted study-only" style="font-size:12px;margin:8px 0 0">
+          This is a reading for a reliability study: judge each bone on its own, accept or reject. Your verdicts change
+          nothing in the dataset.
         </p>
         <label class="check"><input type="checkbox" id="autoNext"> Open the next subject after submitting</label>
         <div id="verdictMessage"></div>

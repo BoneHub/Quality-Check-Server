@@ -7,6 +7,9 @@ dataset root and the credentials folder come from the environment:
     docker compose exec bonehub-qc-server bonehub-qc-server add-user --name bob --roles editor
     docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
     docker compose exec bonehub-qc-server bonehub-qc-server sessions
+
+In a study server (``BONEHUB_QC_MODE=study``) the same commands manage its own users, kept
+with its credentials; nothing is written into the dataset.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import argparse
 import os
 from pathlib import Path
 
-from .config import ENV_PREFIX, QCServerConfig, resolve_credentials_dir, resolve_state_root
+from .config import ENV_PREFIX, QCServerConfig, resolve_credentials_dir, resolve_server_state_root
 from .models import DATA_ACCESS_DESCRIPTIONS, DEFAULT_DATA_ACCESS, DEFAULT_ROLES, ROLES
 from .store import QCStore
 
@@ -51,10 +54,11 @@ def _dataset_root(args: argparse.Namespace) -> Path:
 
 def _open_store(args: argparse.Namespace) -> QCStore:
     dataset_root = _dataset_root(args)
+    credentials_dir = args.credentials_dir or resolve_credentials_dir()
     return QCStore(
         dataset_root=dataset_root,
-        credentials_dir=args.credentials_dir or resolve_credentials_dir(),
-        state_root=resolve_state_root(dataset_root),
+        credentials_dir=credentials_dir,
+        state_root=resolve_server_state_root(dataset_root, credentials_dir),
     )
 
 

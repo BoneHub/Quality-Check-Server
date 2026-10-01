@@ -137,7 +137,8 @@
     }
 
     input,
-    select {
+    select,
+    textarea {
       font: inherit;
       padding: 6px 8px;
       border-radius: 6px;
@@ -402,6 +403,38 @@
     [hidden] {
       display: none !important;
     }
+
+    /* A study server's panel (see qc_server.study) shows the Study section and hides the quality check's. */
+    body.study-mode .qc-only,
+    body:not(.study-mode) .study-only {
+      display: none !important;
+    }
+
+    .checks.wrap {
+      flex-wrap: wrap;
+      gap: 6px 16px;
+    }
+
+    .inputs {
+      display: flex;
+      gap: 4px;
+    }
+
+    .inputs button {
+      white-space: nowrap;
+    }
+
+    h3 {
+      font-size: 13px;
+      margin: 16px 0 6px;
+      color: var(--muted);
+    }
+
+    .facts th {
+      width: 190px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
   </style>
 </head>
 
@@ -439,20 +472,132 @@
           <p class="sub mono" id="datasetRoot" style="margin:0"></p>
         </div>
         <button id="refreshBtn">Refresh</button>
-        <button id="reindexBtn">Re-scan dataset</button>
+        <button class="qc-only" id="reindexBtn">Re-scan dataset</button>
         <button id="logoutBtn">Sign out</button>
       </div>
 
       <div id="globalError" class="banner err" hidden></div>
       <div id="globalOk" class="banner ok" hidden></div>
 
-      <section>
+      <section class="study-only" id="studySection">
+        <h2>Study</h2>
+        <p class="muted" id="studyStatus" style="margin-top:0"></p>
+
+        <div id="studySetup">
+          <div class="row">
+            <div style="flex:2 1 260px">
+              <label for="stName">Name</label>
+              <input id="stName" placeholder="Reviewer reliability, October 2026" style="width:100%">
+            </div>
+            <div>
+              <label for="stSeed">Seed</label>
+              <div class="inputs">
+                <input id="stSeed" type="number" min="0" step="1" style="width:100%"
+                  title="Fixes the random pick of subjects, the raters' codes, each rater's order and the confidence intervals">
+                <button class="small" id="stSeedBtn" title="Fill in a random seed">Pick one</button>
+              </div>
+            </div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <div style="flex:0 0 auto">
+              <label id="stModeLabel">Subjects</label>
+              <div class="checks" role="radiogroup" aria-labelledby="stModeLabel">
+                <label class="inline"><input type="radio" name="stMode" id="stModeRandom" checked> A random pick</label>
+                <label class="inline"><input type="radio" name="stMode" id="stModeList"> A list I type</label>
+              </div>
+            </div>
+            <div class="row" id="stRandomBox" style="flex:3 1 320px">
+              <div>
+                <label for="stCount">How many</label>
+                <input id="stCount" type="number" min="1" style="width:100%">
+              </div>
+              <div>
+                <label for="stDatasets">From dataset ids (optional)</label>
+                <input id="stDatasets" placeholder="1,3 — blank means all" style="width:100%">
+              </div>
+            </div>
+            <div id="stListBox" style="flex:3 1 320px" hidden>
+              <label for="stKeys">Subject ids</label>
+              <textarea id="stKeys" rows="3" placeholder="001_000003, 001_000017, 2_45" style="width:100%"></textarea>
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <label id="stRatersLabel">Raters</label>
+            <div class="checks wrap" id="stRaters" role="group" aria-labelledby="stRatersLabel"></div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <div>
+              <label for="stReadings">Readings per rater</label>
+              <input id="stReadings" type="number" min="1" max="20" value="2" style="width:100%"
+                title="How many times each rater reads each subject. With 1, only inter-rater results are computed">
+            </div>
+            <div>
+              <label for="stGap">Minimum gap</label>
+              <input id="stGap" type="number" min="0" placeholder="half the subjects" style="width:100%"
+                title="At least this many other readings between a rater's two readings of the same subject">
+            </div>
+            <div>
+              <label for="stBootstrap">Bootstrap samples</label>
+              <input id="stBootstrap" type="number" min="100" max="100000" value="2000" style="width:100%"
+                title="How many resamples of the subjects each 95% confidence interval is computed from">
+            </div>
+            <div>
+              <label class="inline" style="margin-top:22px"><input type="checkbox" id="stShowId"> Show subject ids to
+                raters</label>
+            </div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button id="stPreviewBtn">Preview</button>
+            <button class="primary" id="stStartBtn">Start study…</button>
+          </div>
+          <p class="muted" style="margin:8px 0 0">
+            <strong>Preview</strong> saves these settings and shows what they make of the study.
+            <strong>Start</strong> fixes them, copies the subjects' segmentations and gives each rater a code and a
+            list of readings. Raters work on the review page, with the invite link of a user of this server.
+          </p>
+          <div id="stPreview"></div>
+        </div>
+
+        <div id="studyRun" hidden>
+          <table class="facts">
+            <tbody id="stSummary"></tbody>
+          </table>
+          <h3>Progress</h3>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Code</th>
+                  <th>Rater</th>
+                  <th class="right">Readings done</th>
+                  <th>Open now</th>
+                  <th>Last reading</th>
+                </tr>
+              </thead>
+              <tbody id="stProgress"></tbody>
+            </table>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button id="stReportBtn" title="The report, with its figures, in a new tab">View report</button>
+            <button id="stResultsBtn" title="The report, its figures as SVG and PNG, and the readings and the numbers as CSV files">Download results (.zip)</button>
+            <button id="stEndBtn" title="Stop handing out readings: the results become final">End study…</button>
+          </div>
+          <p class="muted" style="margin:8px 0 0">
+            The report and the CSV files name the raters by their codes only. Only this panel shows which code is whom.
+          </p>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="danger" id="stDeleteBtn" hidden>Delete study…</button>
+        </div>
+      </section>
+
+      <section class="qc-only">
         <h2>Queue</h2>
         <div class="grid" id="stats"></div>
         <p class="muted" id="indexedAt" style="margin:12px 0 0"></p>
       </section>
 
-      <section>
+      <section class="qc-only">
         <h2>Approvals</h2>
         <p class="muted" style="margin-top:0">
           Reviewers' and editors' verdicts wait here. Nothing is written into the dataset until you approve a
@@ -510,7 +655,7 @@
             <label for="newName">Name</label>
             <input id="newName" placeholder="alice" style="width:100%">
           </div>
-          <div>
+          <div class="qc-only">
             <label id="newRolesLabel">Roles</label>
             <div class="checks" role="group" aria-labelledby="newRolesLabel">
               <label class="inline" title="Judges each label in the browser, on the review page">
@@ -538,10 +683,14 @@
           </div>
           <button class="primary" id="createBtn">Create &amp; issue key</button>
         </div>
-        <p class="muted" style="margin:8px 0 0">
+        <p class="muted qc-only" style="margin:8px 0 0">
           A reviewer accepts or rejects each label of a subject in the browser, on the review page. An editor
           corrects what reviewers rejected, in 3D Slicer. A user can be both, but never reviews their own
           correction.
+        </p>
+        <p class="muted study-only" style="margin:8px 0 0">
+          Each rater is a user of this server, who reads on the review page with their invite link. A rater must be
+          sent the image and the segmentation. These users are this server's own, apart from the quality check's.
         </p>
         <div id="newKeyBox" class="keybox" hidden>
           <strong>API key for <span id="newKeyName"></span></strong>
@@ -564,10 +713,10 @@
                 <th>Name</th>
                 <th>Key</th>
                 <th>Status</th>
-                <th>Roles</th>
-                <th class="right">Open</th>
-                <th class="right">Reviewed</th>
-                <th class="right">Edited</th>
+                <th class="qc-only">Roles</th>
+                <th class="right qc-only">Open</th>
+                <th class="right qc-only">Reviewed</th>
+                <th class="right qc-only">Edited</th>
                 <th>Sent</th>
                 <th>Datasets</th>
                 <th>Note</th>
@@ -579,7 +728,7 @@
         </div>
       </section>
 
-      <section>
+      <section class="qc-only">
         <h2>Assignments</h2>
         <div class="row" style="margin-bottom:12px">
           <div style="flex:0 0 auto">
@@ -630,7 +779,7 @@
         </div>
       </section>
 
-      <section>
+      <section class="qc-only">
         <h2>Policy</h2>
         <div class="row">
           <div>
@@ -672,9 +821,14 @@
       var KEY_STORAGE = "bonehub_qc_admin_key";
       var CASES_LIMIT = 300;  // subjects listed under Approvals at most, the most recently changed
       var adminKey = null;
+      var mode = "qc";  // what the server is for, as /admin/api/session says: "qc", or "study"
       var config = {};
       var usersByName = {};  // as last listed, for the roles of a user whose key is rotated
       var listedCases = {};  // subject key -> case as last listed, for the stage and revision of a ticked one
+      var listedUsers = [];  // as last listed, for the study's choice of raters
+      var study = { state: "none" };  // the study as last listed, on a study server
+      var chosenRaters = [];  // the raters ticked in the study's settings
+      var studyFormFilled = false;  // the study's settings were put in the form, and are the administrator's now
 
       // What a user may do (User.roles on the server), and where each role works.
       var ROLE_OPTIONS = [
@@ -755,11 +909,19 @@
         adminKey = key;
         return api("GET", "/admin/api/session").then(function (session) {
           try { window.sessionStorage.setItem(KEY_STORAGE, key); } catch (e) { /* private mode */ }
+          mode = session.mode === "study" ? "study" : "qc";
+          document.body.classList.toggle("study-mode", mode === "study");
           $("login").hidden = true;
           $("panel").hidden = false;
-          $("datasetRoot").textContent = session.dataset_root + "  ·  server " + session.server_id +
-            ((session.sessions || []).length > 1 ? "  (" + session.sessions.length + " servers use this dataset)" : "");
-          fillConfig(session.config);
+          if (mode === "study") {
+            document.title = "BoneHub Quality Check · Study";
+            $("datasetRoot").textContent = session.dataset_root + "  ·  reliability study server " + session.server_id +
+              (session.dataset_writable ? "  ·  dataset mounted read-write; BONEHUB_DATASET_ACCESS=ro mounts it read-only" : "");
+          } else {
+            $("datasetRoot").textContent = session.dataset_root + "  ·  server " + session.server_id +
+              ((session.sessions || []).length > 1 ? "  (" + session.sessions.length + " servers use this dataset)" : "");
+            fillConfig(session.config);
+          }
           return refreshAll();
         });
       }
@@ -997,6 +1159,8 @@
       function renderUsers(users) {
         usersByName = {};
         users.forEach(function (u) { usersByName[u.name] = u; });
+        listedUsers = users;
+        renderRaterChoices();
         if (!users.length) {
           $("usersBody").innerHTML = '<tr><td colspan="11" class="muted">No users yet.</td></tr>';
           return;
@@ -1008,10 +1172,10 @@
             '<td class="mono">' + esc(u.key_prefix) + "…</td>" +
             '<td><span class="pill ' + (u.active ? "submitted" : "expired") + '">' +
             (u.active ? "active" : "disabled") + "</span></td>" +
-            '<td class="nowrap">' + roleBoxes(u) + "</td>" +
-            '<td class="right">' + esc(u.open) + "</td>" +
-            '<td class="right">' + esc(u.reviewed) + "</td>" +
-            '<td class="right">' + esc(u.edited) + "</td>" +
+            '<td class="nowrap qc-only">' + roleBoxes(u) + "</td>" +
+            '<td class="right qc-only">' + esc(u.open) + "</td>" +
+            '<td class="right qc-only">' + esc(u.reviewed) + "</td>" +
+            '<td class="right qc-only">' + esc(u.edited) + "</td>" +
             "<td>" + accessSelect(u) + "</td>" +
             "<td>" + esc(datasets) + "</td>" +
             '<td class="muted">' + esc(u.note) + "</td>" +
@@ -1092,6 +1256,20 @@
             detail = (e.role ? "as " + e.role + ", " : "") + "lease until " + shortTime(e.expires_at);
           } else if (e.kind === "user_created" || e.kind === "user_updated") {
             detail = [(e.roles || []).join(" + "), e.key_prefix ? e.key_prefix + "…" : ""].filter(Boolean).join(" · ");
+          } else if (e.kind === "study_reading") {
+            detail = "rater " + e.code + ", reading " + e.position + ": " + e.accepted + " accepted, " + e.rejected +
+              " rejected" + (e.comment ? " — " + e.comment : "");
+          } else if (e.kind === "study_handed_out") {
+            detail = "rater " + e.code + ", reading " + e.position + " handed out";
+          } else if (e.kind === "study_released") {
+            detail = "reading " + e.position + " released; it comes back to the rater next";
+          } else if (e.kind === "study_started") {
+            detail = "'" + e.study + "' started: " + (e.subjects || []).length + " subjects, " +
+              Object.keys(e.raters || {}).length + " raters, " + e.readings_per_rater + " reading(s) each";
+          } else if (e.kind === "study_ended") {
+            detail = "'" + e.study + "' ended with " + e.readings + " reading(s)";
+          } else if (e.kind === "study_deleted") {
+            detail = "'" + e.study + "' deleted (" + e.state + ", " + e.readings + " reading(s))";
           } else if (e.key_prefix) {
             detail = e.key_prefix + "…";
           }
@@ -1138,6 +1316,13 @@
         var latest = function (render) {
           return function (data) { if (refresh === refreshes) { render(data); } };
         };
+        if (mode === "study") {
+          return Promise.all([
+            api("GET", "/admin/api/users").then(latest(renderUsers)),
+            api("GET", "/admin/api/study").then(latest(renderStudy)),
+            api("GET", "/admin/api/submissions?limit=50").then(latest(renderLog))
+          ])["catch"](function (err) { showError(err.message); });
+        }
         var state = $("stateFilter").value;
         return Promise.all([
           api("GET", "/admin/api/stats").then(latest(renderStats)),
@@ -1323,6 +1508,7 @@
         var roles = [];
         if ($("newReviewer").checked) { roles.push("reviewer"); }
         if ($("newEditor").checked) { roles.push("editor"); }
+        if (mode === "study") { roles = ["reviewer"]; }  // a study has raters only, who read on the review page
         api("POST", "/admin/api/users", {
           name: name,
           roles: roles,
@@ -1380,7 +1566,9 @@
             { active: button.getAttribute("data-active") === "true" })
             .then(refreshAll)["catch"](function (err) { showError(err.message); });
         } else if (act === "delete") {
-          if (!window.confirm("Delete user '" + name + "'? Their open subjects return to the queue.")) { return; }
+          if (!window.confirm("Delete user '" + name + "'? " + (mode === "study"
+            ? "The readings they gave stay in the study, under their code."
+            : "Their open subjects return to the queue."))) { return; }
           api("DELETE", "/admin/api/users/" + encodeURIComponent(name))
             .then(refreshAll)["catch"](function (err) { showError(err.message); });
         }
@@ -1414,6 +1602,265 @@
           msg.hidden = false;
           window.setTimeout(function () { msg.hidden = true; }, 4000);
           return refreshAll();
+        })["catch"](function (err) { showError(err.message); });
+      });
+
+      // --- the study (on a study server) ---------------------------------------
+      // The settings stay in the form as the administrator left them; only a first load, or a
+      // deleted study, puts the server's settings in it.
+      function renderStudy(found) {
+        study = found || { state: "none" };
+        var setup = study.state === "none" || study.state === "draft";
+        $("studySetup").hidden = !setup;
+        $("studyRun").hidden = setup;
+        $("stDeleteBtn").hidden = study.state === "none";
+        $("studyStatus").textContent = studyStatusText(study);
+        if (setup && !studyFormFilled) {
+          fillStudyForm(study.state === "draft" ? study.settings : null);
+          studyFormFilled = true;
+        }
+        if (!setup) { renderStudyRun(study); }
+        renderRaterChoices();
+      }
+
+      function studyStatusText(s) {
+        if (s.state === "none") { return "No study yet. Set one up below."; }
+        if (s.state === "draft") {
+          return "Draft, saved " + shortTime(s.updated_at) + ". Nothing is handed out until you start it.";
+        }
+        var done = 0;
+        var total = 0;
+        (s.raters || []).forEach(function (r) { done += r.done; total += r.total; });
+        if (s.state === "running") {
+          return "“" + s.settings.name + "” is running, since " + shortTime(s.started_at) + ": " + done + " of " +
+            total + " readings done.";
+        }
+        return "“" + s.settings.name + "” ended " + shortTime(s.ended_at) + " with " + done + " of " + total +
+          " readings. Its results are final.";
+      }
+
+      function fillStudyForm(s) {
+        s = s || {};
+        $("stName").value = s.name || "";
+        $("stSeed").value = s.seed === undefined || s.seed === null ? "" : s.seed;
+        $("stModeList").checked = s.subject_mode === "list";
+        $("stModeRandom").checked = s.subject_mode !== "list";
+        $("stKeys").value = (s.subject_keys || []).join(", ");
+        $("stCount").value = s.random_count || "";
+        $("stDatasets").value = (s.random_dataset_ids || []).join(",");
+        $("stReadings").value = s.readings_per_rater || 2;
+        $("stGap").value = s.min_gap === undefined || s.min_gap === null ? "" : s.min_gap;
+        $("stBootstrap").value = s.bootstrap_samples || 2000;
+        $("stShowId").checked = !!s.show_subject_id;
+        chosenRaters = (s.raters || []).slice();
+        updateSubjectMode();
+      }
+
+      function updateSubjectMode() {
+        var list = $("stModeList").checked;
+        $("stListBox").hidden = !list;
+        $("stRandomBox").hidden = list;
+      }
+
+      // Why a user cannot be a rater, as the server would say it; "" when they can.
+      function raterProblem(u) {
+        if (!u.active) { return "disabled"; }
+        if ((u.roles || []).indexOf("reviewer") === -1) { return "not a reviewer"; }
+        if (u.data_access !== "image_and_segmentation") { return "not sent the image and the segmentation"; }
+        return "";
+      }
+
+      function renderRaterChoices() {
+        if (mode !== "study" || !(study.state === "none" || study.state === "draft")) { return; }
+        if (!listedUsers.length) {
+          $("stRaters").innerHTML = '<span class="muted">No users yet: create the raters under Create user, then tick them here.</span>';
+          return;
+        }
+        $("stRaters").innerHTML = listedUsers.map(function (u) {
+          var problem = raterProblem(u);
+          var ticked = chosenRaters.indexOf(u.name) !== -1;
+          return '<label class="inline"' + (problem ? ' title="Cannot be a rater: ' + esc(problem) + '"' : "") + ">" +
+            '<input type="checkbox" data-rater="' + esc(u.name) + '"' + (ticked ? " checked" : "") +
+            (problem && !ticked ? " disabled" : "") + "> " + esc(u.name) +
+            (problem ? ' <span class="muted">(' + esc(problem) + ")</span>" : "") + "</label>";
+        }).join("");
+      }
+
+      function studySettings() {
+        var list = $("stModeList").checked;
+        function number(id) {
+          var text = $(id).value.trim();
+          return text === "" ? null : text;  // the server reads the digits; a browser number could round a seed
+        }
+        var settings = {
+          name: $("stName").value.trim(),
+          subject_mode: list ? "list" : "random",
+          subject_keys: list ? $("stKeys").value.split(/[\s,;]+/).filter(Boolean) : [],
+          random_count: list ? null : number("stCount"),
+          random_dataset_ids: list ? null : datasetIds($("stDatasets").value),
+          seed: number("stSeed"),
+          raters: chosenRaters.slice(),
+          min_gap: number("stGap"),
+          show_subject_id: $("stShowId").checked
+        };
+        // Left out when blank, so that the server's defaults apply.
+        if (number("stReadings") !== null) { settings.readings_per_rater = number("stReadings"); }
+        if (number("stBootstrap") !== null) { settings.bootstrap_samples = number("stBootstrap"); }
+        return settings;
+      }
+
+      function datasetIds(text) {
+        var ids = text.split(/[\s,;]+/).filter(Boolean);
+        return ids.length ? ids : null;
+      }
+
+      function renderPreview(p) {
+        var subjects = p.subjects.map(function (s) {
+          return esc(s.subject_key) + ' <span class="muted">(' + esc(s.bones) + " bones)</span>";
+        }).join(", ");
+        var raters = p.raters.map(function (r) { return esc(r.code) + " = " + esc(r.name); }).join(", ");
+        var skipped = "";
+        if (p.skipped_count) {
+          skipped = '<div class="muted" style="margin-top:6px">Left out of the pick: ' + p.skipped.map(function (s) {
+            return esc(s.subject_key) + " (" + esc(s.reason) + ")";
+          }).join("; ") + (p.skipped_count > p.skipped.length ? "; and " + (p.skipped_count - p.skipped.length) + " more" : "") +
+            ".</div>";
+        }
+        $("stPreview").innerHTML = '<div class="banner" style="margin:12px 0 0">' +
+          "<div><strong>" + p.subjects.length + " subject(s)</strong>, " + p.readings_per_rater +
+          " reading(s) of each: every rater does <strong>" + p.readings_each + " readings</strong>" +
+          (p.readings_per_rater > 1 ? ", with at least " + p.min_gap + " others between two readings of one subject" : "") +
+          ", " + p.readings_total + " in all. Saved as the draft.</div>" +
+          '<div style="margin-top:6px">Raters and their codes: ' + raters + "</div>" +
+          '<div style="margin-top:6px">Subjects: ' + subjects + "</div>" + skipped + "</div>";
+      }
+
+      function renderStudyRun(s) {
+        var settings = s.settings;
+        var rows = [
+          ["Name", esc(settings.name)],
+          ["Subjects", s.subjects.length + ' <details style="display:inline"><summary>list</summary>' +
+            s.subjects.map(function (x) { return esc(x.subject_key); }).join(", ") + "</details>"],
+          ["Raters", s.raters.length + ": " + s.raters.map(function (r) { return esc(r.code) + " = " + esc(r.name); }).join(", ")],
+          ["Readings per rater", esc(settings.readings_per_rater) + " of each subject"],
+          ["Minimum gap", settings.readings_per_rater > 1 ? esc(s.min_gap) + " other readings" : "—"],
+          ["Subject ids shown to raters", settings.show_subject_id ? "yes" : "no"],
+          ["Seed", esc(settings.seed)],
+          ["Bootstrap samples", esc(settings.bootstrap_samples)],
+          ["Started", esc(shortTime(s.started_at))],
+          ["Ended", s.ended_at ? esc(shortTime(s.ended_at)) : "—"]
+        ];
+        $("stSummary").innerHTML = rows.map(function (row) {
+          return "<tr><th>" + row[0] + "</th><td>" + row[1] + "</td></tr>";
+        }).join("");
+        $("stProgress").innerHTML = s.raters.map(function (r) {
+          return '<tr><td class="mono">' + esc(r.code) + "</td><td>" + esc(r.name) + "</td>" +
+            '<td class="right">' + esc(r.done) + " of " + esc(r.total) + "</td>" +
+            "<td>" + (r.holding ? "reading " + esc(r.holding) : '<span class="muted">—</span>') + "</td>" +
+            '<td class="nowrap muted">' + esc(shortTime(r.last_reading_at)) + "</td></tr>";
+        }).join("");
+        $("stEndBtn").hidden = s.state !== "running";
+      }
+
+      // A file the admin key unlocks, as a blob and the name the server gives it.
+      function fetchStudyFile(path) {
+        return fetch(path, { headers: { "X-Admin-Key": adminKey } }).then(function (response) {
+          if (!response.ok) {
+            return response.json().then(function (data) {
+              throw new Error(data && data.detail ? data.detail : "HTTP " + response.status);
+            }, function () { throw new Error("HTTP " + response.status); });
+          }
+          var match = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "");
+          return response.blob().then(function (blob) { return { blob: blob, name: match ? match[1] : null }; });
+        });
+      }
+
+      function saveBlob(blob, name) {
+        var link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
+      }
+
+      $("stModeList").addEventListener("change", updateSubjectMode);
+      $("stModeRandom").addEventListener("change", updateSubjectMode);
+      $("stSeedBtn").addEventListener("click", function () {
+        $("stSeed").value = String(Math.floor(Math.random() * 1e9));
+      });
+      $("stRaters").addEventListener("change", function () {
+        chosenRaters = Array.prototype.filter.call($("stRaters").querySelectorAll("input[data-rater]"), function (box) {
+          return box.checked;
+        }).map(function (box) { return box.getAttribute("data-rater"); });
+      });
+
+      $("stPreviewBtn").addEventListener("click", function () {
+        $("stPreview").innerHTML = "";
+        api("POST", "/admin/api/study/preview", studySettings())
+          .then(function (preview) { renderPreview(preview); return refreshAll(); })
+          ["catch"](function (err) { showError(err.message); return refreshAll(); });
+      });
+
+      $("stStartBtn").addEventListener("click", function () {
+        var settings = studySettings();
+        if (!window.confirm("Start the study “" + settings.name + "”? Its settings are fixed from then on: the " +
+          "subjects' segmentations are copied, and each rater gets a code and their list of readings.")) { return; }
+        $("stStartBtn").disabled = true;
+        api("POST", "/admin/api/study/start", settings).then(function (started) {
+          $("stPreview").innerHTML = "";
+          renderStudy(started);
+          showOk("The study has started. Raters can ask for their first reading on the review page.");
+          return refreshAll();
+        })["catch"](function (err) { showError(err.message); })
+          .then(function () { $("stStartBtn").disabled = false; });
+      });
+
+      $("stEndBtn").addEventListener("click", function () {
+        if (!window.confirm("End the study “" + study.settings.name + "”? Raters get no more readings, and a reading " +
+          "open now is not recorded. The results become final.")) { return; }
+        api("POST", "/admin/api/study/end", {}).then(function (ended) {
+          renderStudy(ended);
+          return refreshAll();
+        })["catch"](function (err) { showError(err.message); });
+      });
+
+      $("stDeleteBtn").addEventListener("click", function () {
+        var name = study.settings ? study.settings.name : "";
+        var readings = 0;
+        (study.raters || []).forEach(function (r) { readings += r.done; });
+        var question = study.state === "draft" ? "Delete the draft “" + name + "”?"
+          : "Delete the study “" + name + "” and its " + readings + " reading(s)? They are gone for good: download " +
+          "the results first.";
+        if (!window.confirm(question)) { return; }
+        var settings = study.settings;
+        api("DELETE", "/admin/api/study").then(function () {
+          // Its settings stay in the form, to set up the next study from.
+          fillStudyForm(settings);
+          studyFormFilled = true;
+          $("stPreview").innerHTML = "";
+          showOk("The study is deleted.");
+          return refreshAll();
+        })["catch"](function (err) { showError(err.message); });
+      });
+
+      $("stReportBtn").addEventListener("click", function () {
+        // Opened at once, while the click still counts, so that no popup blocker stops it.
+        var tab = window.open("", "_blank");
+        fetchStudyFile("/admin/api/study/report").then(function (file) {
+          var url = URL.createObjectURL(new Blob([file.blob], { type: "text/html" }));
+          if (tab) { tab.location.href = url; } else { saveBlob(file.blob, "report.html"); }
+          window.setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+        })["catch"](function (err) {
+          if (tab) { tab.close(); }
+          showError(err.message);
+        });
+      });
+
+      $("stResultsBtn").addEventListener("click", function () {
+        fetchStudyFile("/admin/api/study/results").then(function (file) {
+          saveBlob(file.blob, file.name || "study_results.zip");
         })["catch"](function (err) { showError(err.message); });
       });
 

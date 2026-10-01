@@ -7,6 +7,10 @@ it back to the reviewers or the editors, or closes it without writing anything.
 Authentication is the server's admin key, sent as an ``X-Admin-Key`` header. The panel at
 ``/admin`` is a single static page that asks for the key once and keeps it in the
 browser's session storage, so the server stores no sessions of its own.
+
+Two routers. :data:`panel_router` is what a study server's panel has too (see
+:mod:`qc_server.study`): the page itself, the user accounts and the recent activity.
+:data:`router` is the quality check's own: the queue, the subjects' cases and the policy.
 """
 
 from __future__ import annotations
@@ -16,9 +20,11 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import FileResponse
 
+from .config import QC_MODE
 from .models import DEFAULT_DATA_ACCESS, DEFAULT_ROLES, User
 from .store import UNSET, QCError, QCStore
 
+panel_router = APIRouter(prefix="/admin", tags=["admin"])
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -38,8 +44,8 @@ def require_admin(request: Request, x_admin_key: str | None = Header(None, alias
     return store
 
 
-@router.get("", include_in_schema=False)
-@router.get("/", include_in_schema=False)
+@panel_router.get("", include_in_schema=False)
+@panel_router.get("/", include_in_schema=False)
 def admin_panel() -> FileResponse:
     """The page itself is public; every action on it needs the admin key."""
     return FileResponse(STATIC_DIR / "admin.html", media_type="text/html")
@@ -47,9 +53,11 @@ def admin_panel() -> FileResponse:
 
 @router.get("/api/session")
 def check_session(store: QCStore = Depends(require_admin)) -> dict:
-    """Used by the panel to validate the key the administrator typed in."""
+    """Used by the panel to validate the key the administrator typed in. ``mode`` tells the
+    panel which sections to show."""
     return {
         "status": "ok",
+        "mode": QC_MODE,
         "server_id": store.server_id,
         "dataset_root": str(store.dataset_root),
         "state_dir": str(store.state_dir),
@@ -58,12 +66,12 @@ def check_session(store: QCStore = Depends(require_admin)) -> dict:
     }
 
 
-@router.get("/api/users")
+@panel_router.get("/api/users")
 def list_users(store: QCStore = Depends(require_admin)) -> list[dict]:
     return store.list_users()
 
 
-@router.post("/api/users")
+@panel_router.post("/api/users")
 def create_user(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
     """Create a user. The plaintext API key is in the response and nowhere else.
 
@@ -84,7 +92,7 @@ def create_user(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
     }
 
 
-@router.patch("/api/users/{name}")
+@panel_router.patch("/api/users/{name}")
 def update_user(name: str, payload: dict, store: QCStore = Depends(require_admin)) -> dict:
     """Change a user. A field absent from the body is left exactly as it was."""
     allowed = _parse_dataset_ids(payload["allowed_dataset_ids"]) if "allowed_dataset_ids" in payload else UNSET
@@ -101,7 +109,7 @@ def update_user(name: str, payload: dict, store: QCStore = Depends(require_admin
     return user.public_dict()
 
 
-@router.post("/api/users/{name}/rotate-key")
+@panel_router.post("/api/users/{name}/rotate-key")
 def rotate_key(name: str, store: QCStore = Depends(require_admin)) -> dict:
     api_key = store.rotate_user_key(name)
     return {
@@ -111,13 +119,13 @@ def rotate_key(name: str, store: QCStore = Depends(require_admin)) -> dict:
     }
 
 
-@router.post("/api/users/{name}/active")
+@panel_router.post("/api/users/{name}/active")
 def set_active(name: str, payload: dict, store: QCStore = Depends(require_admin)) -> dict:
     user: User = store.set_user_active(name, bool(payload.get("active", True)))
     return user.public_dict()
 
 
-@router.delete("/api/users/{name}")
+@panel_router.delete("/api/users/{name}")
 def delete_user(name: str, store: QCStore = Depends(require_admin)) -> dict:
     store.delete_user(name)
     return {"status": "deleted", "name": name}
@@ -140,7 +148,7 @@ def release(assignment_id: str, store: QCStore = Depends(require_admin)) -> dict
     return store.release_assignment(assignment_id).model_dump()
 
 
-@router.get("/api/submissions")
+@panel_router.get("/api/submissions")
 def submissions(limit: int = 100, kind: str | None = None, store: QCStore = Depends(require_admin)) -> list[dict]:
     return store.audit.read_recent(limit=limit, kind=kind)
 

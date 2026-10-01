@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
 
 from . import __version__, admin, api, auth, review
-from .config import QCServerConfig, resolve_credentials_dir, resolve_dataset_root, resolve_state_root
+from .config import STUDY_MODE, QCServerConfig, resolve_credentials_dir, resolve_dataset_root, resolve_mode, resolve_state_root
 from .models import EDITOR, REVIEWER
 from .store import QCError, QCStore
 
@@ -29,8 +29,14 @@ def create_app(
 
     ``dataset_root`` defaults to ``BONEHUB_QC_DATASET_ROOT`` and ``credentials_dir`` to
     ``BONEHUB_QC_CREDENTIALS_DIR``, so that ``uvicorn qc_server.app:app``
-    works inside the container with no arguments of its own.
+    works inside the container with no arguments of its own. With ``BONEHUB_QC_MODE=study``
+    it builds a reliability study server instead (see :mod:`qc_server.study`).
     """
+    if resolve_mode() == STUDY_MODE:
+        from .study.app import create_study_app
+
+        return create_study_app(dataset_root=dataset_root, credentials_dir=credentials_dir, config=config)
+
     dataset_root = Path(dataset_root) if dataset_root else resolve_dataset_root()
     credentials_dir = Path(credentials_dir) if credentials_dir else resolve_credentials_dir()
 
@@ -52,6 +58,7 @@ def create_app(
     app.state.store.mark_started()
 
     app.include_router(api.router)
+    app.include_router(admin.panel_router)
     app.include_router(admin.router)
     app.include_router(review.router)
     app.mount("/static", StaticFiles(directory=review.STATIC_DIR), name="static")

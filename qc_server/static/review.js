@@ -10,6 +10,10 @@
 // Every request says that it comes from a reviewer, so the server refuses the key of an
 // account that is not one.
 //
+// On a reliability study server (see qc_server.study) the same page shows study readings: each
+// blind, with no history and no lease, and judged bone by bone -- accept or reject, with no
+// missing bones and no rejection of the subject as a whole. The rater sees their own code.
+//
 // Two NiiVue canvases. The 3D view shows each segment as a smooth surface, built here from its
 // voxels; the slice view shows the image with the labels over it.
 
@@ -88,6 +92,34 @@ const state = {
 let nv3d = null;
 let nv2d = null;
 let prefs = loadPrefs();
+
+// Whether the server runs a reliability study rather than the quality check.
+function isStudy() {
+  return !!(state.info && state.info.mode === "study");
+}
+
+// What the page calls a subject: its id -- or, for a study reading, the study's title for it,
+// "Reading n" unless the study shows subject ids.
+function subjectName(handout) {
+  return handout.study ? handout.study.title : handout.subject_key;
+}
+
+// The rater's code, and how far they are, in the top bar; `position` while a reading is open.
+function showStudyProgress(position) {
+  const study = (state.info && state.info.study) || {};
+  const started = study.state === "running" || study.state === "ended";
+  $("whoAccess").textContent = study.code ? `Rater ${study.code}` : started ? "not a rater" : "study not started";
+  $("whoAccess").title = study.code
+    ? "Your code: the study's results name you by it, and by nothing else."
+    : started
+      ? "You are not a rater in this study. Ask the administrator."
+      : "The administrator has not started the study yet. Ask for a subject once they have.";
+  $("studyProgress").textContent = !study.code
+    ? ""
+    : position
+      ? `reading ${position} of ${study.readings_total}`
+      : `${study.readings_done} of ${study.readings_total} readings done`;
+}
 
 // ------------------------------------------------------------------ storage
 function storageGet(name, key) {
@@ -306,8 +338,15 @@ async function signIn(key, remember) {
   $("login").hidden = true;
   $("app").hidden = false;
   $("whoName").textContent = info.user;
-  $("whoAccess").textContent = `sent: ${ACCESS_TEXT[info.data_access] || info.data_access}`;
-  $("whoAccess").title = "What your account is sent of each subject. Your administrator sets this.";
+  if (isStudy()) {
+    document.body.classList.add("study");
+    document.title = "BoneHub Quality Check · Reliability study";
+    $("pageKind").textContent = "Reliability study";
+    showStudyProgress();
+  } else {
+    $("whoAccess").textContent = `sent: ${ACCESS_TEXT[info.data_access] || info.data_access}`;
+    $("whoAccess").title = "What your account is sent of each subject. Your administrator sets this.";
+  }
 
   if (!webgl2Available()) {
     showEmpty(
@@ -1266,7 +1305,7 @@ async function nextSubject() {
     const handout = await api("POST", "/api/v1/subjects/next");
     await openSubject(handout);
   } catch (error) {
-    if (error.status === 404) showEmpty("Nothing to review", error.message);
+    if (error.status === 404) showEmpty(isStudy() ? "No reading for you now" : "Nothing to review", error.message);
     else showEmpty("Could not get a subject", error.message, banner(error.message, "err"));
   } finally {
     setBusy(false);
@@ -1302,18 +1341,25 @@ async function openSubject(handout) {
   renderLabels();
   updateVerdictButtons();
 
-  const key = handout.subject_key;
+  // What the viewers name the volumes after: the subject, or a study reading that hides it.
+  const key = handout.study ? `reading-${handout.study.position}` : handout.subject_key;
+  const name = subjectName(handout);
+  if (handout.study) {
+    // The study may have started since sign-in: the reading says who this rater is in it.
+    state.info.study = { ...state.info.study, state: "running", code: handout.study.code, readings_total: handout.study.total };
+    showStudyProgress(handout.study.position);
+  }
   let imageBuffer = null;
   let segBuffer = null;
   try {
     if (handout.has_image) {
       imageBuffer = await download(handout.image_url, "image", (got, total) =>
-        showProgress(`Downloading the image of ${key}`, got, total),
+        showProgress(`Downloading the image of ${name}`, got, total),
       );
     }
     if (handout.has_segmentation) {
       segBuffer = await download(handout.segmentation_url, "segmentation", (got, total) =>
-        showProgress(`Downloading the segmentation of ${key}`, got, total),
+        showProgress(`Downloading the segmentation of ${name}`, got, total),
       );
     }
     showProgress("Preparing the views…");
@@ -1328,7 +1374,12 @@ async function openSubject(handout) {
       error instanceof RangeError
         ? "The browser ran out of memory. Close other tabs, or review this subject on a computer with more memory."
         : error.message || String(error);
-    showEmpty(`Could not show ${key}`, "You still hold the subject. Try again, or release it for someone else.");
+    showEmpty(
+      `Could not show ${name}`,
+      handout.study
+        ? "You still hold this reading. Try again, or release it and ask for it again later."
+        : "You still hold the subject. Try again, or release it for someone else.",
+    );
     $("emptyMessage").replaceChildren(
       banner(text, "err"),
       el("p", {}, el("button", { onclick: () => openAssignment(handout.assignment_id) }, "Try again")),
@@ -1344,11 +1395,21 @@ function renderSubject() {
   $("verdictCard").hidden = !handout;
   if (!handout) return;
 
-  $("subjectKey").textContent = handout.subject_key;
+  $("subjectKey").textContent = subjectName(handout);
   const dataset = handout.dataset_info || {};
-  $("subjectFacts").replaceChildren(
-    el("div", {}, `${dataset.name || "Dataset"} · dataset ${handout.dataset_id}${dataset.modality ? ` · ${dataset.modality}` : ""}`),
-  );
+  if (handout.study) {
+    // A study reading names the dataset only when the study shows subject ids.
+    const facts = [`reading ${handout.study.position} of ${handout.study.total}`];
+    if (handout.dataset_id !== null && handout.dataset_id !== undefined) {
+      facts.push(`${dataset.name || "Dataset"} · dataset ${handout.dataset_id}`);
+    }
+    if (dataset.modality) facts.push(dataset.modality);
+    $("subjectFacts").replaceChildren(el("div", {}, facts.join(" · ")));
+  } else {
+    $("subjectFacts").replaceChildren(
+      el("div", {}, `${dataset.name || "Dataset"} · dataset ${handout.dataset_id}${dataset.modality ? ` · ${dataset.modality}` : ""}`),
+    );
+  }
   renderLease();
 
   const notes = [];
@@ -1392,7 +1453,7 @@ function isEditor() {
 
 function renderLease() {
   const handout = state.handout;
-  if (!handout) return;
+  if (!handout || handout.study) return; // a study reading has no lease time
   const expires = new Date(handout.expires_at);
   const minutes = Math.round((expires - Date.now()) / 60000);
   const relative =
@@ -1403,8 +1464,10 @@ function renderLease() {
 }
 
 // ------------------------------------------------------------------- labels
-// What the quality check has made of a label so far, in words, for its status column.
+// What the quality check has made of a label so far, in words, for its status column. Nothing,
+// for a study reading: it is blind to what anyone made of the bone before.
 function labelStatus(label) {
+  if (isStudy()) return { text: "", title: "" };
   const by = label.by ? ` · ${label.by}` : "";
   switch (label.state) {
     case "pending":
@@ -1501,9 +1564,11 @@ function verdictButtons(label) {
         className: "reject",
         "aria-pressed": String(verdict === "reject"),
         disabled: !judgeable,
-        title: label.painted
-          ? "Reject: something is wrong with it. An editor corrects it, or takes it out"
-          : "Reject: the bone is in the scan and missing from the segmentation",
+        title: isStudy()
+          ? "Reject: something is wrong with the segmentation of this bone"
+          : label.painted
+            ? "Reject: something is wrong with it. An editor corrects it, or takes it out"
+            : "Reject: the bone is in the scan and missing from the segmentation",
         onclick: () => setVerdict(label.name, "reject"),
       },
       "✗",
@@ -1562,7 +1627,11 @@ function renderLabels() {
   const pending = [...state.labels.values()].filter((label) => label.state === "pending");
   const foot = [];
   if (pending.length) {
-    foot.push(`${pending.length} label(s) under review: accept (✓) or reject (✗) each.`);
+    foot.push(
+      isStudy()
+        ? `Accept (✓) or reject (✗) each of the ${pending.length} bones, each on its own.`
+        : `${pending.length} label(s) under review: accept (✓) or reject (✗) each.`,
+    );
   } else if (state.labels.size) {
     foot.push("No label is under review; reject one if you see a problem.");
   }
@@ -1740,19 +1809,28 @@ function updateVerdictButtons() {
     holding && state.loaded && !open.length && (accepted.length > 0 || toEditors > 0 || !underReview);
 
   const confirm = $("confirmBtn");
-  confirm.textContent = toEditors
-    ? `Send to editors (${toEditors})`
-    : accepted.length
-      ? `Accept ${accepted.length} label${accepted.length === 1 ? "" : "s"}`
-      : "Submit verdict";
+  if (isStudy()) {
+    confirm.textContent = "Submit";
+    confirm.title = !holding
+      ? ""
+      : open.length
+        ? `Give every bone a verdict first: ${open.join(", ")}.`
+        : "Record your verdicts for this reading.";
+  } else {
+    confirm.textContent = toEditors
+      ? `Send to editors (${toEditors})`
+      : accepted.length
+        ? `Accept ${accepted.length} label${accepted.length === 1 ? "" : "s"}`
+        : "Submit verdict";
+    confirm.title = !holding
+      ? ""
+      : open.length
+        ? `Give every label under review a verdict first: ${open.join(", ")}.`
+        : toEditors
+          ? "The rejected labels go to the editors, to correct in 3D Slicer."
+          : "The subject waits for the administrator's approval.";
+  }
   confirm.disabled = state.busy || !ready;
-  confirm.title = !holding
-    ? ""
-    : open.length
-      ? `Give every label under review a verdict first: ${open.join(", ")}.`
-      : toEditors
-        ? "The rejected labels go to the editors, to correct in 3D Slicer."
-        : "The subject waits for the administrator's approval.";
   $("rejectBtn").disabled = state.busy || !holding;
   $("releaseBtn").disabled = state.busy || !holding;
   $("extendBtn").disabled = state.busy || !holding;
@@ -1773,6 +1851,10 @@ async function onSubmit() {
     return;
   }
   const { accepted, rejected, missing } = verdictToSend();
+  if (isStudy()) {
+    await submitReading(handout, accepted, rejected);
+    return;
+  }
   const toEditors = rejected.length + missing.length > 0;
   const leftOver = [...state.labels.values()].some(
     (label) => label.state === "pending" && !state.verdicts.has(label.name),
@@ -1818,6 +1900,29 @@ async function onSubmit() {
   await submitVerdict(metadata, "Submitting…");
 }
 
+// A study reading: every bone accepted or rejected, and nothing else.
+async function submitReading(handout, accepted, rejected) {
+  const body = [
+    el("p", {}, `${accepted.length} bone(s) `, el("strong", {}, "accepted"), `, ${rejected.length} `, el("strong", {}, "rejected"), "."),
+  ];
+  if (rejected.length) body.push(el("ul", {}, rejected.map((name) => el("li", {}, name))));
+  body.push(el("p", { className: "muted" }, "Your verdicts are recorded for the study, and cannot be changed afterwards."));
+  if (state.sliceSpacing) {
+    body.push(el("p", {}, `Your comment will note that you saw the scan at ${formatSpacing(1)}.`));
+  }
+  if (!(await ask(`Submit ${subjectName(handout)}?`, body, "Submit"))) return;
+  await submitVerdict(
+    {
+      quality_check_confirmed: true,
+      use_stored_segmentation: true,
+      confirmed_labels: accepted,
+      rejected_labels: rejected,
+      comment: commentToSend(),
+    },
+    "Submitting…",
+  );
+}
+
 async function onReject() {
   const handout = state.handout;
   const comment = $("comment").value.trim();
@@ -1859,7 +1964,12 @@ async function submitVerdict(metadata, workingText) {
     const result = await api("POST", `/api/v1/assignments/${encodeURIComponent(handout.assignment_id)}/submit`, {
       form,
     });
-    await finishSubject(`${handout.subject_key}: ${result.message || "submitted."}`);
+    if (handout.study) {
+      state.info.study = { ...state.info.study, readings_done: result.readings_done, readings_total: result.readings_total };
+      await finishSubject(result.message || "Recorded.");
+    } else {
+      await finishSubject(`${handout.subject_key}: ${result.message || "submitted."}`);
+    }
   } catch (error) {
     showVerdictMessage(`Not submitted, so you still hold the subject: ${error.message}`, "err");
   } finally {
@@ -1870,15 +1980,23 @@ async function submitVerdict(metadata, workingText) {
 async function onRelease() {
   const handout = state.handout;
   const sure = await ask(
-    `Release ${handout.subject_key}?`,
-    [el("p", {}, "It goes back to the queue without a verdict, and someone else can review it.")],
+    `Release ${subjectName(handout)}?`,
+    [
+      el(
+        "p",
+        {},
+        handout.study
+          ? "It comes back to you the next time you ask for a subject: study readings cannot be skipped."
+          : "It goes back to the queue without a verdict, and someone else can review it.",
+      ),
+    ],
     "Release",
   );
   if (!sure) return;
   setBusy(true);
   try {
     await api("POST", `/api/v1/assignments/${encodeURIComponent(handout.assignment_id)}/release`);
-    await finishSubject(`${handout.subject_key} was released.`);
+    await finishSubject(`${subjectName(handout)} was released.`);
   } catch (error) {
     showVerdictMessage(error.message, "err");
   } finally {
@@ -1911,6 +2029,7 @@ async function finishSubject(message) {
   renderSubject();
   renderLabels();
   updateToolbar();
+  if (isStudy()) showStudyProgress();
   showEmpty("Done", "Ask for the next subject when you are ready.", banner(message, "ok"));
   if (prefs.autoNext) {
     setBusy(false);
