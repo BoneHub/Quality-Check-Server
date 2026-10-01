@@ -45,7 +45,7 @@ local disk or an SMB share.
 | --- | --- | --- |
 | Administrator | the admin panel, `http://<host>:8000/admin` | creates users, follows progress, approves results |
 | Reviewer | the review page, `http://<host>:8000/review`, in any modern browser; nothing to install | accepts or rejects each label, reports missing bones |
-| Editor | 3D Slicer, with the [BoneHub Quality Check extension](https://github.com/BoneHub/qc-slicer) | corrects rejected labels, adds missing bones, segments subjects that have no segmentation |
+| Editor | 3D Slicer, with the [BoneHub Quality Check extension](https://github.com/BoneHub/Quality-Check-3DSlicer-Extension) | corrects rejected labels, adds missing bones, segments subjects that have no segmentation |
 
 One person can be both a reviewer and an editor. The server never asks anyone to review their
 own correction.
@@ -168,7 +168,7 @@ state an older one left behind, start a
    - send a reviewer their **invite link**, which opens the review page already signed in;
    - send an editor their **key** and the server's address, `http://<host>:8000`.
 5. **Editors install the extension.** Its
-   [README](https://github.com/BoneHub/qc-slicer)
+   [README](https://github.com/BoneHub/Quality-Check-3DSlicer-Extension)
    explains how.
 6. **If users connect from outside a trusted network, put HTTPS in front of the server.** Keys
    and images travel with every request.
@@ -822,7 +822,7 @@ seconds.
 ### Editors: 3D Slicer
 
 Editors need 3D Slicer 5.6 or newer and the
-[BoneHub Quality Check extension](https://github.com/BoneHub/qc-slicer),
+[BoneHub Quality Check extension](https://github.com/BoneHub/Quality-Check-3DSlicer-Extension),
 whose README covers installing and using it. In short, an editor:
 
 1. enters the server address and their key, and presses **Connect**;
