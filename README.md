@@ -134,8 +134,8 @@ In `.env`, fill in **one** of the two options and leave the other blank:
 - A share password cannot contain a comma. Write a `$` in it as `$$`.
 - **After changing the share or any `BONEHUB_SMB_…` value**, recreate the share's volume.
   This loses nothing, because the volume only holds the connection to the share. For a
-  server with a [name of its own](#another-server-on-this-computer), write that name instead
-  of `bonehub_qc`:
+  server with an [env file of its own](#another-server-on-this-computer), write its name
+  instead of `bonehub_qc` and add its `--env-file` to both `docker compose` commands:
 
   ```bash
   docker compose down && docker volume rm bonehub_qc_dataset && docker compose up -d
@@ -604,7 +604,9 @@ docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
 
 ### Command line
 
-Run these on the computer where the server runs, in the project folder:
+Run these on the computer where the server runs, in the project folder. For a server with an
+[env file of its own](#another-server-on-this-computer), add it to each, e.g.
+`docker compose --env-file .env.study logs -f`:
 
 | Command | What it does |
 | --- | --- |
@@ -623,21 +625,33 @@ Run these on the computer where the server runs, in the project folder:
 
 ### Another server on this computer
 
-One computer can run several servers, each on a dataset of its own or on the same one. Each
-runs from its own copy of this project folder, whose `.env` sets:
+One computer can run several servers from this project folder, each on a dataset of its own
+or on the same one. Each server has an env file of its own in place of `.env`, e.g. `.env.qc`
+and `.env.study`. Copy `.env.example` to it and set:
 
 | Variable | Value |
 | --- | --- |
-| `COMPOSE_PROJECT_NAME` | a name of its own, e.g. `bonehub_qc_2`. Blank is `bonehub_qc` |
+| `COMPOSE_PROJECT_NAME` | a name of its own, e.g. `bonehub_qc_study`. Blank is `bonehub_qc` |
 | `BONEHUB_QC_PORT` | a free port, e.g. `8001` |
 | `BONEHUB_DATASET_PATH` or `BONEHUB_DATASET_SHARE` | its dataset, as [for the first server](#tell-the-server-where-the-dataset-is) |
 
-Docker names the server's container and volumes after its name, so its credentials go into
-`bonehub_qc_2_credentials`. Run every `docker compose` command, updates included, in the
-server's own folder.
+Then name the server's env file in **every** `docker compose` command, updates included:
 
-- **A copy left at the same name takes over the first server:** `docker compose up -d` in it
-  replaces the first server's container with its own settings.
+```bash
+docker compose --env-file .env.study up -d --build
+docker compose --env-file .env.study exec bonehub-qc-server bonehub-qc-server show-admin-key
+```
+
+Docker names the server's container and volumes after its name, so its credentials go into
+`bonehub_qc_study_credentials`.
+
+- **Keep no `.env` next to the env files.** A command run without `--env-file` falls back to
+  `.env` and acts on that server: a `docker compose down -v` meant for one server would delete
+  another's credentials. With no `.env`, the command stops with an error instead. Renaming a
+  server's `.env` to e.g. `.env.qc` keeps the server, as long as its `COMPOSE_PROJECT_NAME`
+  stays the same.
+- **Two env files with the same name are the same server:** `up -d` with the second replaces
+  the first server's container with its own settings.
 - **Renaming a server that has already run starts a new server**, with a new admin key and no
   users. The old name's credentials volume still holds the old server.
 
@@ -851,8 +865,9 @@ dataset never sees it. Its reports name the raters by codes only.
 
 ### Start a study server
 
-1. Copy this project folder, as for [another server on this computer](#another-server-on-this-computer).
-2. In the copy's `.env`, set:
+1. Give it an env file of its own, e.g. `.env.study`, as for
+   [another server on this computer](#another-server-on-this-computer).
+2. In `.env.study`, set:
 
    | Variable | Value |
    | --- | --- |
@@ -862,8 +877,8 @@ dataset never sees it. Its reports name the raters by codes only.
    | `BONEHUB_DATASET_ACCESS` | `ro`: the dataset is mounted read-only |
    | `BONEHUB_DATASET_PATH` or `BONEHUB_DATASET_SHARE` | the dataset, as for the quality-check server |
 
-3. Run `docker compose up -d --build` in the copy, and print its admin key with
-   `docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key`.
+3. Start it with `docker compose --env-file .env.study up -d --build`, and print its admin key
+   with `docker compose --env-file .env.study exec bonehub-qc-server bonehub-qc-server show-admin-key`.
 4. Open `http://<host>:8001/admin`. The panel shows **Study**, **Create user**, **Users** and
    **Recent activity**.
 5. Create a user for each rater and send them their invite link,
@@ -871,8 +886,9 @@ dataset never sees it. Its reports name the raters by codes only.
    These users are the study server's own: a key of the quality-check server does not work here.
 
 The study server keeps everything (its users, the study, the readings, and copies of the
-study's segmentations) in its credentials volume, under `state/<server id>/`. Run in its
-folder, `docker compose down -v` wipes it completely, and leaves the quality check untouched.
+study's segmentations) in its credentials volume, under `state/<server id>/`.
+`docker compose --env-file .env.study down -v` wipes it completely, and leaves the quality
+check untouched.
 
 ### Set up the study
 
