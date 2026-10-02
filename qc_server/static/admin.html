@@ -449,9 +449,10 @@
       <div id="loginError" class="banner err" hidden></div>
       <label for="adminKey">Admin key</label>
       <div class="row">
-        <div><input id="adminKey" type="password" placeholder="bhqc_..." autocomplete="off" style="width:100%"></div>
+        <div><input id="adminKey" type="password" autocomplete="off" style="width:100%"></div>
         <button class="primary" id="loginBtn">Sign in</button>
       </div>
+      <label class="inline" style="margin-top:8px"><input type="checkbox" id="showAdminKey"> Show the key</label>
       <p class="muted" style="margin-bottom:0">
         A new server prints its key once, at its first start, unless <code>BONEHUB_QC_ADMIN_KEY</code>
         in <code>.env</code> sets it. The key is kept inside the container; print it again with
@@ -939,6 +940,10 @@
 
       $("adminKey").addEventListener("keydown", function (event) {
         if (event.key === "Enter") { $("loginBtn").click(); }
+      });
+
+      $("showAdminKey").addEventListener("change", function () {
+        $("adminKey").type = $("showAdminKey").checked ? "text" : "password";
       });
 
       $("logoutBtn").addEventListener("click", function () {

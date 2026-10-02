@@ -2043,6 +2043,9 @@ function wire() {
   $("apiKey").addEventListener("keydown", (event) => {
     if (event.key === "Enter") $("signInBtn").click();
   });
+  $("showKey").addEventListener("change", () => {
+    $("apiKey").type = $("showKey").checked ? "text" : "password";
+  });
   $("signOutBtn").addEventListener("click", signOut);
 
   $("nextBtn").addEventListener("click", nextSubject);
