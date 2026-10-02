@@ -44,11 +44,15 @@ LabelState = Literal["pending", "accepted", "rejected", "removed", "kept"]
 
 
 class User(BaseModel):
-    """A user: a reviewer, an editor, or both. The API key itself is never stored, only its HMAC digest."""
+    """A user: a reviewer, an editor, or both. A key is checked against its HMAC digest; the key itself is
+    kept only so the admin panel can show it again."""
 
     name: str = Field(..., description="Unique user name, used as the login identity")
     key_prefix: str = Field(..., description="First characters of the API key, shown in the admin panel")
     key_hash: str = Field(..., description="HMAC-SHA256 of the API key, keyed with the server private key")
+    api_key: str | None = Field(
+        None, description="The API key, for the admin panel to show again. None for a key issued before keys were kept"
+    )
     created_at: str = Field(..., description="ISO-8601 UTC timestamp")
     active: bool = Field(True, description="Disabled users are rejected at authentication")
     roles: list[Role] = Field(
@@ -94,8 +98,8 @@ class User(BaseModel):
         return self.data_access != "image"
 
     def public_dict(self) -> dict:
-        """Everything about the user except the key digest."""
-        return self.model_dump(exclude={"key_hash"})
+        """Everything about the user except the key and its digest."""
+        return self.model_dump(exclude={"key_hash", "api_key"})
 
 
 class Assignment(BaseModel):

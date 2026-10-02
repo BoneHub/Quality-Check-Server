@@ -57,6 +57,8 @@ services:
       # in the credentials volume. The generated admin key is printed once, at that start.
       BONEHUB_QC_ADMIN_KEY: "${BONEHUB_QC_ADMIN_KEY:-}"
       BONEHUB_QC_PRIVATE_KEY: "${BONEHUB_QC_PRIVATE_KEY:-}"
+      # Users the server has from its start, with the keys chosen for them: alice:key1,bob:key2.
+      BONEHUB_QC_USERS: "${BONEHUB_QC_USERS:-}"
       # What the server is for: blank for the quality check, "study" for a reliability study
       # of the reviewers, which keeps everything in the credentials volume.
       BONEHUB_QC_MODE: "${BONEHUB_QC_MODE:-}"

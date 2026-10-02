@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             f"Created user '{user.name}', {' and '.join(user.roles)}, who is sent "
             f"{DATA_ACCESS_DESCRIPTIONS[user.data_access]}."
         )
-        print(f"API key (shown once): {api_key}")
+        print(f"API key: {api_key}")
         return 0
 
     if args.command == "list-users":
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "rotate-key":
-        print(f"New API key for '{args.name}' (shown once): {store.rotate_user_key(args.name)}")
+        print(f"New API key for '{args.name}': {store.rotate_user_key(args.name)}")
         return 0
 
     if args.command == "show-admin-key":

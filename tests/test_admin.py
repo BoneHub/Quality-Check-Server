@@ -22,6 +22,7 @@ class AdminAuthTests(ApiTestCase):
         for method, path in [
             ("get", "/admin/api/session"),
             ("get", "/admin/api/users"),
+            ("get", "/admin/api/users/alice/key"),
             ("get", "/admin/api/stats"),
             ("get", "/admin/api/assignments"),
             ("get", "/admin/api/submissions"),
@@ -43,18 +44,30 @@ class AdminAuthTests(ApiTestCase):
 
 
 class AdminUserManagementTests(ApiTestCase):
-    def test_creating_a_user_returns_the_key_exactly_once(self):
+    def test_creating_a_user_returns_the_key(self):
         response = self.client.post("/admin/api/users", json={"name": "carol"}, headers=self.admin_headers)
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertTrue(body["api_key"].startswith("bhqc_"))
-        self.assertIn("only once", body["warning"])
         self.assertNotIn("key_hash", body["user"])
+        self.assertNotIn("api_key", body["user"])
 
         listed = self.client.get("/admin/api/users", headers=self.admin_headers).json()
         carol = next(u for u in listed if u["name"] == "carol")
         self.assertNotIn("key_hash", carol)
+        self.assertNotIn("api_key", carol)
         self.assertTrue(body["api_key"].startswith(carol["key_prefix"]))
+
+    def test_a_key_can_be_shown_again(self):
+        key = self.client.post("/admin/api/users", json={"name": "carol"}, headers=self.admin_headers).json()[
+            "api_key"
+        ]
+        shown = self.client.get("/admin/api/users/carol/key", headers=self.admin_headers).json()
+        self.assertEqual(shown, {"name": "carol", "api_key": key})
+
+        new_key = self.client.post("/admin/api/users/carol/rotate-key", headers=self.admin_headers).json()["api_key"]
+        shown = self.client.get("/admin/api/users/carol/key", headers=self.admin_headers).json()
+        self.assertEqual(shown["api_key"], new_key)
 
     def test_a_created_key_works_immediately_as_a_client(self):
         key = self.client.post("/admin/api/users", json={"name": "carol"}, headers=self.admin_headers).json()[
@@ -129,6 +142,7 @@ class AdminUserManagementTests(ApiTestCase):
         self.assertEqual(
             self.client.post("/admin/api/users/nobody/rotate-key", headers=self.admin_headers).status_code, 404
         )
+        self.assertEqual(self.client.get("/admin/api/users/nobody/key", headers=self.admin_headers).status_code, 404)
 
     def test_the_user_list_shows_progress_per_user(self):
         self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"])

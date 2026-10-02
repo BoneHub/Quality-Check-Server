@@ -35,6 +35,7 @@ NON_CONFIG_ENV_NAMES = {
     "PORT",
     "ADMIN_KEY",
     "PRIVATE_KEY",
+    "USERS",  # users and their keys, defined at the start (auth.users_from_env)
     "TIMEZONE",  # read by Compose alone, which passes it to the container as TZ
     "MODE",  # the quality check, or a reliability study server (qc_server.study)
 }

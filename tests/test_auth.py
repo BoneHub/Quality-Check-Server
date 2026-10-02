@@ -97,18 +97,38 @@ class UserAccountTests(QCTestCase):
         self.default_dataset()
         self.store = self.make_store()
 
-    def test_creating_a_user_returns_a_key_that_is_never_stored_in_plaintext(self):
+    def test_creating_a_user_keeps_its_key_with_the_credentials(self):
+        """The key is kept so the admin panel can show it again; logging in checks its digest."""
         user, api_key = self.store.create_user("alice")
         self.assertEqual(user.name, "alice")
         self.assertTrue(api_key.startswith(auth.API_KEY_PREFIX))
 
         raw = (self.credentials_dir / "users.json").read_text(encoding="utf-8")
-        self.assertNotIn(api_key, raw)
+        self.assertIn(api_key, raw)
         self.assertIn(user.key_hash, raw)
+        self.assertEqual(self.store.user_key("alice"), api_key)
 
-    def test_the_public_view_of_a_user_hides_the_digest(self):
+    def test_a_new_key_is_the_one_shown_again(self):
+        self.store.create_user("alice")
+        new_key = self.store.rotate_user_key("alice")
+        self.assertEqual(self.store.user_key("alice"), new_key)
+
+    def test_a_key_issued_before_keys_were_kept_cannot_be_shown(self):
+        self.store.create_user("alice")
+        users_path = self.credentials_dir / "users.json"
+        entries = json.loads(users_path.read_text(encoding="utf-8"))
+        del entries[0]["api_key"]
+        users_path.write_text(json.dumps(entries), encoding="utf-8")
+
+        with self.assertRaises(QCError) as ctx:
+            self.make_store().user_key("alice")
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertIn("new key", ctx.exception.message)
+
+    def test_the_public_view_of_a_user_hides_the_key_and_its_digest(self):
         user, _ = self.store.create_user("alice")
         self.assertNotIn("key_hash", user.public_dict())
+        self.assertNotIn("api_key", user.public_dict())
         self.assertIn("key_prefix", user.public_dict())
 
     def test_each_client_gets_its_own_name_and_key(self):
@@ -212,6 +232,7 @@ class UserAccountTests(QCTestCase):
         for entry in listed:
             self.assertEqual((entry["open"], entry["reviewed"], entry["edited"]), (0, 0, 0))
             self.assertNotIn("key_hash", entry)
+            self.assertNotIn("api_key", entry)
 
     def test_changing_the_private_key_invalidates_every_issued_key(self):
         """Keys are digests under the private key, so rotating it locks everyone out."""
@@ -226,6 +247,62 @@ class UserAccountTests(QCTestCase):
         entries = json.loads((self.credentials_dir / "users.json").read_text(encoding="utf-8"))
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["name"], "alice")
+
+
+class UsersFromTheEnvironmentTests(QCTestCase):
+    """BONEHUB_QC_USERS: users and their keys, defined in the env file like the admin key."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.default_dataset()
+
+    def test_names_and_keys_are_read_from_the_environment(self):
+        os.environ[auth.ENV_USERS] = " alice : key-of-alice , bob:key-of-bob,"
+        self.assertEqual(auth.users_from_env(), {"alice": "key-of-alice", "bob": "key-of-bob"})
+
+    def test_no_variable_defines_no_users(self):
+        self.assertEqual(auth.users_from_env(), {})
+
+    def test_a_malformed_entry_is_refused_without_printing_a_key(self):
+        for value in ["alice", "alice:", ":secret-key", "alice:secret-key,alice:other-key", "a:secret-key,b:secret-key"]:
+            os.environ[auth.ENV_USERS] = value
+            with self.assertRaises(RuntimeError, msg=value) as ctx:
+                auth.users_from_env()
+            self.assertNotIn("secret-key", str(ctx.exception))
+            self.assertIn(auth.ENV_USERS, str(ctx.exception))
+
+    def test_the_server_starts_with_the_users_and_their_keys(self):
+        os.environ[auth.ENV_USERS] = "alice:key-of-alice,bob:key-of-bob"
+        store = self.make_store()
+        self.assertEqual(store.authenticate("key-of-alice").name, "alice")
+        self.assertEqual(store.authenticate("key-of-bob").name, "bob")
+        self.assertEqual(store.user_key("alice"), "key-of-alice")
+
+    def test_a_restart_keeps_what_the_panel_changed_but_restores_the_key(self):
+        os.environ[auth.ENV_USERS] = "alice:key-of-alice"
+        store = self.make_store()
+        store.update_user("alice", note="knee", roles=[REVIEWER])
+        store.rotate_user_key("alice")
+
+        restarted = self.make_store()
+        self.assertEqual(restarted.authenticate("key-of-alice").name, "alice")
+        alice = restarted.list_users()[0]
+        self.assertEqual((alice["note"], alice["roles"]), ("knee", [REVIEWER]))
+
+    def test_a_changed_key_in_the_environment_replaces_the_old_one(self):
+        os.environ[auth.ENV_USERS] = "alice:first-key"
+        self.make_store()
+        os.environ[auth.ENV_USERS] = "alice:second-key"
+        restarted = self.make_store()
+        self.assertEqual(restarted.authenticate("second-key").name, "alice")
+        with self.assertRaises(QCError):
+            restarted.authenticate("first-key")
+
+    def test_the_keys_work_again_after_the_private_key_changes(self):
+        os.environ[auth.ENV_USERS] = "alice:key-of-alice"
+        self.make_store()
+        os.environ[auth.ENV_PRIVATE_KEY] = "a-brand-new-server-private-key"
+        self.assertEqual(self.make_store().authenticate("key-of-alice").name, "alice")
 
 
 class AccountsChangedByAnotherProcessTests(QCTestCase):

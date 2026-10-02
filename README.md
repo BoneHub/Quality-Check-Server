@@ -164,8 +164,8 @@ state an older one left behind, start a
 3. **Check the policy.** The defaults suit a first quality check. The
    [Settings](#settings) section explains each one. Settings in `.env` win over the panel at
    every start.
-4. **Create users** under **Create user**. Pick their roles and what they are sent. The key is
-   shown **once**:
+4. **Create users** under **Create user**, or [in the env file](#users-from-the-env-file). Pick
+   their roles and what they are sent. Then:
    - send a reviewer their **invite link**, which opens the review page already signed in;
    - send an editor their **key** and the server's address, `http://<host>:8000`.
 5. **Editors install the extension.** Its
@@ -267,7 +267,7 @@ no buttons: it is finished.
 
 **Create user** makes a new account: a name, its roles, which datasets it may see (blank means
 all), what it is sent of each subject, and an optional note. **Create & issue key** shows the
-key once, together with an invite link for a reviewer. See
+key, together with an invite link for a reviewer. See
 [Users, roles and keys](#users-roles-and-keys).
 
 The **Users** table lists every account:
@@ -284,6 +284,7 @@ The **Users** table lists every account:
 
 The buttons:
 
+- **Show key** shows the user's key again, with their invite link.
 - **New key** issues a new key. The old one stops working immediately.
 - **Disable** blocks the account until you press **Enable**.
 - **Delete** removes the account. Any subjects the user holds go back to the queue.
@@ -350,8 +351,10 @@ have every label judged again) or **To editors** (with a comment saying what to 
 runs out, 24 hours by default. To free it sooner, press **Release** under **Assignments**.
 Users can extend their own lease, from the review page or from 3D Slicer.
 
-**Replace a lost or leaked key.** Press **New key** for that user and send them the new key or
-invite link.
+**Send a key again.** Press **Show key** for that user.
+
+**Replace a leaked key.** Press **New key** for that user and send them the new key or invite
+link.
 
 **Remove someone.** **Disable** blocks them for now. **Delete** removes them, and their open
 subjects go back to the queue.
@@ -408,6 +411,7 @@ Other variables in `.env`:
 | `BONEHUB_QC_PORT` | The port the server is reached on. Default `8000` |
 | `BONEHUB_QC_ADMIN_KEY` | Choose the admin key yourself. Blank: the server makes one at its first start |
 | `BONEHUB_QC_PRIVATE_KEY` | The secret behind every user key. Blank: the server makes one. **Changing it makes every issued key stop working** |
+| `BONEHUB_QC_USERS` | Users and their keys, as `alice:key1,bob:key2`. See [Users from the env file](#users-from-the-env-file) |
 
 Most changes apply from each user's next request. A new lease time applies to subjects handed
 out after the change. `bonehub-qc-server show-config` prints the settings in use.
@@ -471,14 +475,33 @@ handed subjects of those datasets only.
 
 ### Keys
 
-- **A key is shown only once**, when you create the user or press **New key**. The server keeps
-  only a fingerprint of it, so it cannot show the key again.
+- **Show key** shows a user's key again at any time. The keys are kept inside the container,
+  with the admin key. A key issued before the server kept keys cannot be shown: press
+  **New key** once for that user.
 - **Reviewers** get an **invite link**, `http://<host>:8000/review#key=bhqc_...`, which signs them
   in to the review page. The key after `#` never reaches the server's logs. The link still *is*
   the key, so send it privately.
 - **Editors** get the key and the server address, which they enter in the 3D Slicer extension.
 - **Copy key** and **Copy invite link** work only over HTTPS or on `localhost`. Otherwise, select
   the text and copy it by hand.
+
+### Users from the env file
+
+To start a server with its users already there, list them with keys you choose in
+`BONEHUB_QC_USERS`, as `name:key` pairs separated by commas:
+
+```bash
+BONEHUB_QC_USERS=alice:bhqc_4f9a...,bob:bhqc_77c2...
+```
+
+A key can be any text without commas or colons. `echo bhqc_$(openssl rand -hex 24)` makes a
+good one. At every start, the server creates each user it does not have yet, and gives each
+user the key set here. **New key** in the panel therefore lasts only until the next start.
+
+Only the name and the key come from the env file. A new user starts as reviewer and editor,
+sent the image and the segmentation, for all datasets. Change that in the panel; the server
+keeps it. A user you delete in the panel comes back at the next start, unless you remove them
+here too.
 
 ### From the command line
 
@@ -788,7 +811,8 @@ other server has the subjects (*On other servers*).
 Print it again: `docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key`.
 
 **Everyone's key stopped working.**
-`BONEHUB_QC_PRIVATE_KEY` changed. Issue new keys, or put the old value back.
+`BONEHUB_QC_PRIVATE_KEY` changed. Issue new keys, or put the old value back. Users defined in
+`BONEHUB_QC_USERS` get their keys back at the next start.
 
 ## What reviewers and editors see
 

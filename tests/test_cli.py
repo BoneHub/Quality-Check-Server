@@ -30,7 +30,7 @@ class CommandLineTests(QCTestCase):
     def test_add_user_prints_a_usable_key(self):
         output = self.cli("add-user", "--name", "alice")
         self.assertIn("alice", output)
-        api_key = output.split("API key (shown once):")[1].strip()
+        api_key = output.split("API key:")[1].strip()
         self.assertTrue(api_key.startswith("bhqc_"))
 
         store = self.make_store()
@@ -53,8 +53,8 @@ class CommandLineTests(QCTestCase):
         self.assertIn("No users yet", self.cli("list-users"))
 
     def test_rotate_key_issues_a_working_replacement(self):
-        old = self.cli("add-user", "--name", "alice").split("API key (shown once):")[1].strip()
-        new = self.cli("rotate-key", "--name", "alice").split("(shown once):")[1].strip()
+        old = self.cli("add-user", "--name", "alice").split("API key:")[1].strip()
+        new = self.cli("rotate-key", "--name", "alice").split("':")[1].strip()
         self.assertNotEqual(old, new)
 
         store = self.make_store()

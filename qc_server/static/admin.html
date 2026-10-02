@@ -1180,6 +1180,7 @@
             "<td>" + esc(datasets) + "</td>" +
             '<td class="muted">' + esc(u.note) + "</td>" +
             '<td class="nowrap right">' +
+            '<button data-act="show-key" data-name="' + esc(u.name) + '">Show key</button> ' +
             '<button data-act="rotate" data-name="' + esc(u.name) + '">New key</button> ' +
             '<button data-act="toggle" data-name="' + esc(u.name) + '" data-active="' + (!u.active) + '">' +
             (u.active ? "Disable" : "Enable") + "</button> " +
@@ -1467,7 +1468,7 @@
       function showKey(name, apiKey, roles) {
         var reviewer = roles.indexOf("reviewer") !== -1;
         var editor = roles.indexOf("editor") !== -1;
-        var help = ["Shown once only."];
+        var help = [];
         if (reviewer) {
           help.push("The invite link opens the review page with them signed in. It carries the key, so send it privately.");
         }
@@ -1554,7 +1555,11 @@
         var name = button.getAttribute("data-name");
         var act = button.getAttribute("data-act");
 
-        if (act === "rotate") {
+        if (act === "show-key") {
+          api("GET", "/admin/api/users/" + encodeURIComponent(name) + "/key")
+            .then(function (result) { showKey(result.name, result.api_key, (usersByName[result.name] || {}).roles || []); })
+            ["catch"](function (err) { showError(err.message); });
+        } else if (act === "rotate") {
           if (!window.confirm("Issue a new key for '" + name + "'? The current key stops working immediately.")) { return; }
           api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/rotate-key", {})
             .then(function (result) {

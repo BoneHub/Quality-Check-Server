@@ -73,10 +73,7 @@ def list_users(store: QCStore = Depends(require_admin)) -> list[dict]:
 
 @panel_router.post("/api/users")
 def create_user(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
-    """Create a user. The plaintext API key is in the response and nowhere else.
-
-    ``roles`` defaults to both, reviewer and editor.
-    """
+    """Create a user, with their API key in the response. ``roles`` defaults to both, reviewer and editor."""
     name = str(payload.get("name", "")).strip()
     allowed = _parse_dataset_ids(payload.get("allowed_dataset_ids"))
     note = str(payload.get("note", "") or "")
@@ -88,7 +85,7 @@ def create_user(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
     return {
         "user": user.public_dict(),
         "api_key": api_key,
-        "warning": "This key is shown only once. Copy it now and give it to the user.",
+        "warning": "Send this key to the user privately.",
     }
 
 
@@ -115,8 +112,14 @@ def rotate_key(name: str, store: QCStore = Depends(require_admin)) -> dict:
     return {
         "name": name,
         "api_key": api_key,
-        "warning": "The previous key stopped working. This one is shown only once.",
+        "warning": "The previous key stopped working.",
     }
+
+
+@panel_router.get("/api/users/{name}/key")
+def show_key(name: str, store: QCStore = Depends(require_admin)) -> dict:
+    """A user's current API key, shown again."""
+    return {"name": name, "api_key": store.user_key(name)}
 
 
 @panel_router.post("/api/users/{name}/active")

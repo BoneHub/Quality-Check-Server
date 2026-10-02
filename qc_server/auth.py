@@ -3,7 +3,8 @@
 Credentials never go on the dataset share. They live in the credentials folder inside the
 container (``BONEHUB_QC_CREDENTIALS_DIR``, a Docker volume on the Docker host), together
 with the user accounts. The server's private key derives the digests of users' API keys and
-compares the admin key, so only ``HMAC-SHA256(private_key, api_key)`` is ever written down.
+compares the admin key: a key is checked against ``HMAC-SHA256(private_key, api_key)``. The
+user accounts keep the keys too, so the admin panel can show a key again.
 
 The credentials folder also holds the server's id. It names the folder on the share where
 this server keeps everything that is not a credential, so several servers -- each with its
@@ -31,6 +32,7 @@ ADMIN_KEY_FILE_NAME = "admin_key"
 
 ENV_PRIVATE_KEY = "BONEHUB_QC_PRIVATE_KEY"
 ENV_ADMIN_KEY = "BONEHUB_QC_ADMIN_KEY"
+ENV_USERS = "BONEHUB_QC_USERS"
 
 #: A server id becomes a folder name on the share, so it is kept to safe characters.
 _SERVER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -93,8 +95,26 @@ def load_or_create_admin_key(credentials_dir: Path) -> tuple[str, bool]:
     return key, True
 
 
+def users_from_env() -> dict[str, str]:
+    """``name -> api_key`` of the users ``BONEHUB_QC_USERS`` defines, as ``alice:key1,bob:key2``."""
+    users: dict[str, str] = {}
+    for number, entry in enumerate(os.environ.get(ENV_USERS, "").split(","), start=1):
+        if not entry.strip():
+            continue
+        name, _, key = (part.strip() for part in entry.partition(":"))
+        # The message names the entry by its place, so a key never ends up in the log.
+        if not name or not key:
+            raise RuntimeError(f"Entry {number} of {ENV_USERS} is not a name:key pair, such as alice:bhqc_abc123.")
+        if name in users:
+            raise RuntimeError(f"{ENV_USERS} names user '{name}' twice.")
+        if key in users.values():
+            raise RuntimeError(f"{ENV_USERS} gives two users the same key; each user needs a key of their own.")
+        users[name] = key
+    return users
+
+
 def generate_api_key() -> str:
-    """A fresh API key for a user. Shown once, then only its digest is kept."""
+    """A fresh API key for a user."""
     return API_KEY_PREFIX + secrets.token_urlsafe(API_KEY_BYTES)
 
 

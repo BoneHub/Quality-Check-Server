@@ -7,7 +7,8 @@ inside the container, never on the dataset share::
     |-- server_id             this server's name; a new credentials folder is a new server
     |-- server_private_key    generated on first start, unless BONEHUB_QC_PRIVATE_KEY is set
     |-- admin_key             generated on first start, unless BONEHUB_QC_ADMIN_KEY is set
-    `-- users.json            users, their roles and their API key digests
+    `-- users.json            users, their roles, their API keys and the keys' digests;
+                              BONEHUB_QC_USERS can define users and their keys
 
 Everything else is on the share, in a folder of this server's own, so that several
 servers -- each with its own admin -- can work on one dataset without overwriting each
@@ -211,6 +212,7 @@ class QCStore:
         self._applying: set[str] = set()
 
         self._record_session()
+        self._define_users_from_env()
 
         self._index: list[SubjectRef] = []
         self._index_by_key: dict[str, SubjectRef] = {}
@@ -409,7 +411,7 @@ class QCStore:
     # ------------------------------------------------------------------ users
     @property
     def users_path(self) -> Path:
-        """User accounts hold key digests, so they stay with the credentials, off the share."""
+        """User accounts hold keys, so they stay with the credentials, off the share."""
         return self.credentials_dir / USERS_FILE_NAME
 
     def _load_users(self) -> dict[str, User]:
@@ -457,11 +459,11 @@ class QCStore:
         note: str = "",
         data_access: str = DEFAULT_DATA_ACCESS,
         roles: Iterable[str] = DEFAULT_ROLES,
+        api_key: str | None = None,
     ) -> tuple[User, str]:
-        """Create a user and return it together with its plaintext API key.
+        """Create a user and return it together with its API key, a new one unless ``api_key`` is given.
 
         ``roles`` is what the user may do: ``reviewer``, ``editor``, or both, the default.
-        The plaintext key is returned exactly once; only its digest is stored.
         """
         name = name.strip()
         if not name:
@@ -472,11 +474,12 @@ class QCStore:
             self._refresh_users()
             if name in self._users:
                 raise QCError(f"User '{name}' already exists.", status_code=409)
-            api_key = auth.generate_api_key()
+            api_key = api_key or auth.generate_api_key()
             user = User(
                 name=name,
                 key_prefix=auth.key_prefix(api_key),
                 key_hash=auth.hash_api_key(api_key, self.private_key),
+                api_key=api_key,
                 created_at=utc_now_iso(),
                 active=True,
                 roles=roles,
@@ -493,16 +496,45 @@ class QCStore:
         )
         return user, api_key
 
-    def rotate_user_key(self, name: str) -> str:
-        """Issue a new API key for a user and invalidate the old one."""
+    def rotate_user_key(self, name: str, api_key: str | None = None) -> str:
+        """Give a user a new API key, ``api_key`` or a generated one, and invalidate the old one."""
         with self._users_lock:
             user = self._require_user(name)
-            api_key = auth.generate_api_key()
+            api_key = api_key or auth.generate_api_key()
             user.key_prefix = auth.key_prefix(api_key)
             user.key_hash = auth.hash_api_key(api_key, self.private_key)
+            user.api_key = api_key
             self._save_users()
         self.audit.record("user_key_rotated", {"user": name}, summary=f"Rotated API key for user '{name}'.")
         return api_key
+
+    def _define_users_from_env(self) -> None:
+        """Create the users ``BONEHUB_QC_USERS`` defines, and give each the key it sets there.
+
+        Only the name and the key come from the environment. Roles, what the user is sent and
+        the rest are the defaults at first, and whatever the admin panel makes them afterwards.
+        """
+        for name, api_key in auth.users_from_env().items():
+            with self._users_lock:
+                self._refresh_users()
+                user = self._users.get(name)
+            if user is None:
+                self.create_user(name, api_key=api_key)
+            # The digest too: a new private key leaves a digest that no longer matches the key.
+            elif user.api_key != api_key or user.key_hash != auth.hash_api_key(api_key, self.private_key):
+                self.rotate_user_key(name, api_key)
+
+    def user_key(self, name: str) -> str:
+        """A user's current API key, for the admin panel to show again."""
+        with self._users_lock:
+            user = self._require_user(name)
+        if user.api_key is None:
+            raise QCError(
+                f"The key of '{name}' was issued before the server kept keys, so it cannot be shown. "
+                "Issue a new key to have one that can.",
+                status_code=404,
+            )
+        return user.api_key
 
     def set_user_active(self, name: str, active: bool) -> User:
         with self._users_lock:
