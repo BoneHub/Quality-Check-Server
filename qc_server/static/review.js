@@ -1377,7 +1377,7 @@ async function openSubject(handout) {
     showEmpty(
       `Could not show ${name}`,
       handout.study
-        ? "You still hold this reading. Try again, or release it and ask for it again later."
+        ? "You still hold this reading. Try again, or reload the page."
         : "You still hold the subject. Try again, or release it for someone else.",
     );
     $("emptyMessage").replaceChildren(
@@ -1981,15 +1981,7 @@ async function onRelease() {
   const handout = state.handout;
   const sure = await ask(
     `Release ${subjectName(handout)}?`,
-    [
-      el(
-        "p",
-        {},
-        handout.study
-          ? "It comes back to you the next time you ask for a subject: study readings cannot be skipped."
-          : "It goes back to the queue without a verdict, and someone else can review it.",
-      ),
-    ],
+    [el("p", {}, "It goes back to the queue without a verdict, and someone else can review it.")],
     "Release",
   );
   if (!sure) return;

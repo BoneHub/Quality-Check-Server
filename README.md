@@ -920,8 +920,8 @@ The readings in between are of the study's other subjects. There are no dummy su
 - **Every bone gets one verdict**, accept or reject. There is no missing-bone report and no
   **Reject subject**. The comment is optional; it goes into `readings.csv`, not into the numbers.
 - A rater holds one reading at a time, the next in their list. Several raters can read the same
-  subject at the same time. A reading has no lease time. **Release** hands it back, but it stays
-  the rater's next reading: readings cannot be skipped.
+  subject at the same time. A reading has no lease time and cannot be skipped, so there is no
+  **Release**: a rater who leaves finds the same reading waiting when they come back.
 - The panel's **Progress** shows each rater's code, name and readings done. **Recent activity**
   lists each reading.
 - **End study…** stops handing out readings. A reading open at that moment is not recorded.
