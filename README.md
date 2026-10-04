@@ -247,32 +247,39 @@ Each row shows:
   "On approval: 3 set to 2".
 - **Segmentation**: "the dataset's own" or "correction by eddie". **Download** saves it as a
   `.seg.nrrd` file, to open in 3D Slicer.
-- **Latest**: the last step, who took it, and their comment. While you filter by comment,
-  this column shows the matching comments instead.
+- **Latest**: the last step, who took it, and their comment, with the remark it added to
+  `Subject_info` when that is not its comment. While you filter by comment, this column shows
+  the matching comments instead.
 
-The buttons:
+Tick the subjects to act on (the box in the header row ticks every subject listed), then press
+one of the buttons above the list:
 
-| Button | What it does |
+| Button | What it does to the ticked subjects |
 | --- | --- |
-| **Approve** | Writes this subject into the dataset. Only for subjects waiting for approval |
-| **Approve ticked…** | Approves the subjects you ticked, after asking for an optional remark to add to their `Subject_info` (see [Remarks](#remarks)). Lists any it could not approve, with the reason |
-| **To reviewers** | Sends the subject back to the reviewers: every verdict is reviewed again. You can add a comment |
-| **To editors** | Sends the subject to an editor with your comment, for example what to fix |
-| **Close** | Ends the quality check of this subject without writing its labels or segmentation. It asks for an optional remark to add to its `Subject_info` (see [Remarks](#remarks)), filled in with the reviewer's comment for a rejected subject, where the button reads **Close…**. It is not handed out again unless you press To reviewers or To editors, which reopen it |
+| **Approve…** | Writes them into the dataset |
+| **Close…** | Ends their quality check without writing their labels or segmentations. They are not handed out again unless you send them to the reviewers or the editors, which reopens them. One closed already stays as it is |
+| **To reviewers…** | Sends them back to the reviewers: every verdict is reviewed again. You can add a comment for the reviewers |
+| **To editors…** | Sends them to an editor, with a comment saying what to fix if you like |
 
-The box in the header row ticks every subject listed. **Approve ticked…** approves only what you
-ticked, never more, and each subject only as it was listed: one that changed since, because
-somebody gave a verdict on it or took it, is left out and reported. Refresh and look again.
+Each button opens a dialog that says what will happen and asks for an optional remark to add to
+the subjects' `Subject_info` (see [Remarks](#remarks)). For **Close…**, when every ticked
+subject is a rejected one and their reviewers gave the same reason, the remark starts from that
+reason. Afterwards the panel lists any subject it could not act on, with the reason.
 
-You can also tick a subject that does **not** wait for approval: one a reviewer rejected, one
+The buttons act only on what you ticked, never more, and only on subjects the filters keep:
+while the list reloads after you change a filter, they wait. Each subject is acted on only as it
+was listed: one that changed since, because somebody gave a verdict on it or took it, is left
+out and reported. Refresh and look again.
+
+You can also approve a subject that does **not** wait for approval: one a reviewer rejected, one
 an editor escalated, one waiting for a reviewer, or one you closed. The dialog says so first.
 Approving it sets only the labels a reviewer accepted to `2`. The labels nobody accepted keep
 the status they have in `Subject_info`, normally `1`, so they stay marked as not reviewed. An
 editor's correction waiting on the server is written into the dataset all the same.
 
-While someone is working on a subject, its buttons and its tick box are replaced by "with
-*name*". To act on it anyway, release it first under **Assignments**. An approved subject has
-no buttons: it is finished.
+While someone is working on a subject, it has no tick box, and "with *name*" shows under its
+stage. To act on it anyway, release it first under **Assignments**. An approved subject cannot
+be ticked: it is finished.
 
 ### Create user and Users
 
@@ -329,8 +336,8 @@ in `.env` comes back at the next restart.
 
 **Approve finished subjects.** Under **Approvals**, show *waiting for approval*. Open the
 **Labels** summary to see who accepted what. If you want to look yourself, **Download** the
-segmentation and open it in 3D Slicer. Then press **Approve**, or tick the subjects (the box
-in the header ticks them all) and press **Approve ticked…**.
+segmentation and open it in 3D Slicer. Then tick the subjects (the box in the header ticks them
+all) and press **Approve…**.
 
 **Record a finding, such as an implant, in `Subject_info`.** Ask the reviewers to judge each
 bone as usual, and to write the finding in their comment, always in the same words, for
@@ -340,33 +347,35 @@ help (see below); otherwise its bones are still worth reviewing. Then, before yo
 1. Under **Approvals**, show *waiting for approval* and type `hip implant` in **Comments
    containing**.
 2. Read the matching comments, and tick the subjects they really describe.
-3. Press **Approve ticked…** and type the remark, for example `Hip implant`. Each ticked subject's
+3. Press **Approve…** and type the remark, for example `Hip implant`. Each ticked subject's
    `remarks` in `Subject_info` gets `QC: Hip implant` (see [Remarks](#remarks)).
 
-Approve these subjects first. **Approve** and **Approve ticked…** without a remark write none,
-and an approved subject cannot be given one afterwards, except by editing `Subject_info` by
-hand. Show *all* to find subjects with the finding at other stages, for example one a
-reviewer rejected for it before you gave these instructions.
+Approve these subjects first. **Approve…** without a remark writes none, and an approved subject
+cannot be given one afterwards, except by editing `Subject_info` by hand. Show *all* to find
+subjects with the finding at other stages, for example one a reviewer rejected for it before
+you gave these instructions.
 
 **Deal with a rejected subject.** Show *rejected subjects* and read the reviewer's reason
-under **Latest**. Then:
+under **Latest**. Tick the subject, then press:
 
-- **Close…**, which asks for a remark, filled in with the reviewer's comment. Edit it into the
-  words you use for that finding, for example `Hip implant`, and it is added to the subject's
-  `remarks` in `Subject_info` as `QC: Hip implant` (see [Remarks](#remarks)). Nothing else is
-  written: the label statuses and the segmentation stay as they are;
-- **To reviewers**, if you disagree with the reviewer: every label is judged again.
+- **Close…**, whose remark starts from the reviewer's comment. Edit it into the words you use
+  for that finding, for example `Hip implant`, and it is added to the subject's `remarks` in
+  `Subject_info` as `QC: Hip implant` (see [Remarks](#remarks)). Nothing else is written: the
+  label statuses and the segmentation stay as they are. Subjects rejected for the same reason
+  can be closed together;
+- **To reviewers…**, if you disagree with the reviewer: every label is judged again.
 
 **Deal with an escalated subject.** Show *escalated by an editor* and read the editor's
-comment under **Latest**. Then:
+comment under **Latest**. Tick the subject, then press:
 
-- **To editors**, with a comment saying what to do, if it can be fixed after all;
-- **To reviewers**, if the verdicts should be looked at again;
-- **Close**, if the subject cannot be used, with a remark for its `Subject_info` if you like.
+- **To editors…**, with a comment saying what to do, if it can be fixed after all;
+- **To reviewers…**, if the verdicts should be looked at again;
+- **Close…**, if the subject cannot be used, with a remark for its `Subject_info` if you like.
   Nothing else is written into the dataset.
 
-**Send back a subject that does not look right.** Before approving, press **To reviewers** (to
-have every label judged again) or **To editors** (with a comment saying what to fix).
+**Send back a subject that does not look right.** Before approving, tick it and press **To
+reviewers…** (to have every label judged again) or **To editors…** (with a comment saying what
+to fix).
 
 **Free a subject someone is holding.** A subject returns to the queue by itself when the lease
 runs out, 24 hours by default. To free it sooner, press **Release** under **Assignments**.
@@ -601,9 +610,9 @@ that no reviewer accepted.
 
 ### Remarks
 
-A remark you give when approving or closing a subject is added to the end of its `remarks` in
-`Subject_info`, tagged `QC:` so that it can be told apart from the remarks the converters
-wrote:
+A remark you give when approving, closing or sending back a subject is added to the end of its
+`remarks` in `Subject_info`, tagged `QC:` so that it can be told apart from the remarks the
+converters wrote:
 
 | `remarks` before | After approving with the remark `Hip implant` |
 | --- | --- |
@@ -620,6 +629,8 @@ wrote:
   writes neither. It is kept with the subject's history, where **Comments containing** finds it
   too.
 - Closing a subject writes the remark and nothing else: how a rejected subject is recorded.
+- Sending a subject to the reviewers or the editors writes the remark at once, and nothing
+  else. The comment you give them is theirs to read, and is not written into `Subject_info`.
 - Nothing undoes a remark. Correct a wrong one by hand in `Subject_info_XXX.json`.
 - People will find subjects by searching `remarks` as text, so use the same words for the same
   finding every time.
@@ -630,8 +641,7 @@ Approval is **refused** when:
   tool or another server wrote it. Approving would overwrite that change. Send the subject
   back to review instead;
 - the dataset was regenerated under another schema version;
-- someone holds the subject right now, or, with **Approve ticked…**, it changed after you listed
-  it.
+- someone holds the subject right now, or it changed after you listed it.
 
 If `Subject_info` cannot be written, the old segmentation is put back. A subject is never left
 half approved.
@@ -810,12 +820,12 @@ review.**
 `.env` sets it. Blank it there to manage it from the panel, then run `docker compose up -d`.
 See [Where settings come from](#where-settings-come-from).
 
-**A subject has no buttons, only "with *name*".**
+**A subject has no tick box, and "with *name*" under its stage.**
 Someone is working on it. Wait, or press **Release** under **Assignments**.
 
 **Approve is refused: "the dataset's segmentation changed".**
 Something other than this server changed the segmentation in the dataset after the quality
-check began. Press **To reviewers** so the current segmentation is reviewed.
+check began. Tick the subject and press **To reviewers…** so the current segmentation is reviewed.
 
 **A user's verdict was not recorded: "handed out again" or "changed after it was handed out".**
 Their lease ran out and someone else got the subject, or someone else (or you) acted on the
@@ -1073,7 +1083,7 @@ segmentation paints it while `Subject_info` lists it as not available, or not at
 | `/docs` | Interactive OpenAPI documentation |
 | `/health` | Unauthenticated liveness probe |
 | `/api/v1/...` | Client API, authenticated with `X-API-Key`, in the role named by `X-Client-Role` |
-| `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals. `cases?comment=` finds subjects by their comments, and `POST cases/approve` takes `subject_keys`, a `remark`, `allow_unaccepted` and the `revisions` the subjects were listed at. `POST cases/{key}/close` takes a `remark` too |
+| `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals. `cases?comment=` finds subjects by their comments, and `POST cases/approve` takes `subject_keys`, a `remark`, `allow_unaccepted` and the `revisions` the subjects were listed at. `POST cases/close` takes `subject_keys`, a `remark` and `revisions`, and `POST cases/return` those and `to` (`review` or `edit`) and a `comment`. `POST cases/{key}/approve`, `/close` and `/return` act on one subject |
 | `/static/...` | The pages' scripts and the vendored NiiVue viewer |
 
 A [study server](#reliability-study) answers the review page at the same `/api/v1` paths, with

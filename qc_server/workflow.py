@@ -268,9 +268,12 @@ def escalate(case: Case, editor: str, comment: str | None, assignment_id: str | 
     return {}
 
 
-def return_to_review(case: Case, comment: str | None, now: str, by: str = ADMIN) -> dict:
+def return_to_review(
+    case: Case, comment: str | None, now: str, by: str = ADMIN, remark: str | None = None, remark_added: bool = False
+) -> dict:
     """Send every verdict back to the reviewers: the labels someone accepted, rejected or
-    removed wait for a review again, and open requests are dropped. Reopens a closed case."""
+    removed wait for a review again, and open requests are dropped. Reopens a closed case.
+    ``remark`` is as for :func:`close`."""
     returned = sorted(
         name
         for name, label in case.labels.items()
@@ -280,15 +283,18 @@ def return_to_review(case: Case, comment: str | None, now: str, by: str = ADMIN)
         label = case.labels[name]
         case.labels[name] = CaseLabel(state=PENDING, painted=label.painted, at=now, edited_by=label.edited_by)
     case.requests = []
-    details = {"to": REVIEW, "labels": returned}
+    details = {"to": REVIEW, "labels": returned, **_remark_details(remark, remark_added)}
     _step(case, by, ADMIN, "return", derived_stage(case), comment, None, now, details)
     return details
 
 
-def return_to_edit(case: Case, comment: str | None, now: str, by: str = ADMIN) -> dict:
-    """Send the subject to the editors, with the administrator's word. Reopens a closed case."""
+def return_to_edit(
+    case: Case, comment: str | None, now: str, by: str = ADMIN, remark: str | None = None, remark_added: bool = False
+) -> dict:
+    """Send the subject to the editors, with the administrator's word. Reopens a closed case.
+    ``remark`` is as for :func:`close`."""
     case.requests.append(CaseRequest(by=by, role=ADMIN, at=now, comment=comment or None))
-    details = {"to": EDIT}
+    details = {"to": EDIT, **_remark_details(remark, remark_added)}
     _step(case, by, ADMIN, "return", derived_stage(case), comment, None, now, details)
     return details
 
@@ -298,7 +304,7 @@ def close(
 ) -> dict:
     """Finish the case without writing its labels or segmentation into the dataset: only the
     ``remark`` asked for, added to the subject's remarks or found there already."""
-    details = {"remark": remark, "remark_added": remark_added} if remark else {}
+    details = _remark_details(remark, remark_added)
     _step(case, by, ADMIN, "close", CLOSED, comment, None, now, details)
     return details
 
@@ -378,6 +384,12 @@ def _remark_parts(remarks: str) -> str:
 
 
 # ---------------------------------------------------------------------- helpers
+def _remark_details(remark: str | None, remark_added: bool) -> dict:
+    """What a step records of the remark it asked for: added to the subject's remarks, or
+    found there already. Nothing when there is none."""
+    return {"remark": remark, "remark_added": remark_added} if remark else {}
+
+
 def _step(
     case: Case,
     by: str,

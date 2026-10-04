@@ -2,8 +2,9 @@
 
 Reviewers' and editors' verdicts wait in the server's state folder. The administrator
 approves a subject whose labels are all accepted, which writes it into the dataset, or sends
-it back to the reviewers or the editors, or closes it without writing its labels -- with a
-remark for its Subject_info, for one a reviewer rejected as a whole.
+it back to the reviewers or the editors, or closes it without writing its labels -- several
+subjects at once, each time with a remark for their Subject_info if they like, such as why a
+reviewer rejected one as a whole.
 
 Authentication is the server's admin key, sent as an ``X-Admin-Key`` header. The panel at
 ``/admin`` is a single static page that asks for the key once and keeps it in the
@@ -181,15 +182,40 @@ def approve_all(payload: dict | None = None, store: QCStore = Depends(require_ad
     """
     payload = payload or {}
     keys = payload.get("subject_keys")
-    if keys is not None and not isinstance(keys, list):
-        raise QCError("subject_keys must be a list of subject keys, such as ['001_000001'].")
     results = store.approve_all(
-        [str(key) for key in keys] if keys is not None else None,
+        _parse_keys(keys) if keys is not None else None,
         remark=payload.get("remark"),
         allow_unaccepted=_parse_flag(payload, "allow_unaccepted"),
         revisions=_parse_revisions(payload.get("revisions")),
     )
     return {"approved": sum(1 for r in results if r["approved"]), "results": results}
+
+
+@router.post("/api/cases/return")
+def return_all(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
+    """Send the subjects named in ``subject_keys`` back, ``to`` "review" or "edit", with the
+    ``comment`` for whoever gets them. One that cannot be sent back is reported, and the others
+    go ahead. ``remark`` and ``revisions`` are as for approving several at once."""
+    results = store.return_all(
+        _parse_keys(payload.get("subject_keys")),
+        str(payload.get("to", "")),
+        payload.get("comment"),
+        remark=payload.get("remark"),
+        revisions=_parse_revisions(payload.get("revisions")),
+    )
+    return {"returned": sum(1 for r in results if r["returned"]), "results": results}
+
+
+@router.post("/api/cases/close")
+def close_all(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
+    """Close the subjects named in ``subject_keys``. One that cannot be closed is reported, and
+    the others go ahead. ``remark`` and ``revisions`` are as for approving several at once."""
+    results = store.close_all(
+        _parse_keys(payload.get("subject_keys")),
+        remark=payload.get("remark"),
+        revisions=_parse_revisions(payload.get("revisions")),
+    )
+    return {"closed": sum(1 for r in results if r["closed"]), "results": results}
 
 
 @router.get("/api/cases/{subject_key}")
@@ -214,14 +240,11 @@ def approve(subject_key: str, payload: dict | None = None, store: QCStore = Depe
     editor's correction replaces the dataset's segmentation. ``remark``, ``allow_unaccepted``
     and ``revision`` are as for approving several at once."""
     payload = payload or {}
-    revision = payload.get("revision")
-    if revision is not None and (not isinstance(revision, int) or isinstance(revision, bool)):
-        raise QCError("revision must be the whole number the case listing gives the subject.")
     outcome = store.approve(
         subject_key,
         remark=payload.get("remark"),
         allow_unaccepted=_parse_flag(payload, "allow_unaccepted"),
-        revision=revision,
+        revision=_parse_revision(payload.get("revision")),
     )
     return {
         "case": outcome.case.model_dump(),
@@ -237,17 +260,29 @@ def approve(subject_key: str, payload: dict | None = None, store: QCStore = Depe
 @router.post("/api/cases/{subject_key}/return")
 def return_case(subject_key: str, payload: dict, store: QCStore = Depends(require_admin)) -> dict:
     """Send a subject back: ``{"to": "review"}`` has every verdict reviewed again, ``{"to": "edit"}``
-    hands it to the editors with the ``comment``. Reopens a closed subject."""
-    return store.return_case(subject_key, str(payload.get("to", "")), payload.get("comment")).model_dump()
+    hands it to the editors with the ``comment``. Reopens a closed subject. ``remark`` is added
+    to its remarks in Subject_info, as ``QC: <remark>``; ``revision`` is as for approving it."""
+    return store.return_case(
+        subject_key,
+        str(payload.get("to", "")),
+        payload.get("comment"),
+        remark=payload.get("remark"),
+        revision=_parse_revision(payload.get("revision")),
+    ).model_dump()
 
 
 @router.post("/api/cases/{subject_key}/close")
 def close_case(subject_key: str, payload: dict | None = None, store: QCStore = Depends(require_admin)) -> dict:
     """Finish a subject's quality check without writing its labels or segmentation into the
     dataset. ``remark`` is added to its remarks in Subject_info, as ``QC: <remark>``: how a
-    subject a reviewer rejected is recorded."""
+    subject a reviewer rejected is recorded. ``revision`` is as for approving it."""
     payload = payload or {}
-    return store.close_case(subject_key, payload.get("comment"), remark=payload.get("remark")).model_dump()
+    return store.close_case(
+        subject_key,
+        payload.get("comment"),
+        remark=payload.get("remark"),
+        revision=_parse_revision(payload.get("revision")),
+    ).model_dump()
 
 
 @router.post("/api/refresh-index")
@@ -306,6 +341,20 @@ def _parse_flag(payload: dict, name: str) -> bool:
     if not isinstance(value, bool):
         raise QCError(f"{name} must be true or false.")
     return value
+
+
+def _parse_keys(raw) -> list[str]:
+    """The subjects a request names."""
+    if not isinstance(raw, list):
+        raise QCError("subject_keys must be a list of subject keys, such as ['001_000001'].")
+    return [str(key) for key in raw]
+
+
+def _parse_revision(raw) -> int | None:
+    """The revision the administrator saw a subject at, as the case listing gives it."""
+    if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool)):
+        raise QCError("revision must be the whole number the case listing gives the subject.")
+    return raw
 
 
 def _parse_revisions(raw) -> dict[str, int] | None:

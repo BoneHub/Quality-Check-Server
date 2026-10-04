@@ -947,8 +947,9 @@ class QCStore:
         holds the subject right now, if anybody.
 
         ``comment`` keeps the cases with a comment that contains it, anywhere in their history
-        and whoever wrote it, ignoring case and spacing. Each then carries ``matches``: the steps
-        of its history whose comment does.
+        and whoever wrote it, ignoring case and spacing; a remark the administrator added to
+        Subject_info counts as a comment. Each then carries ``matches``: the steps of its
+        history whose comment or remark does.
         """
         wanted = set(stages) if stages else None
         needle = _searchable(comment)
@@ -962,7 +963,11 @@ class QCStore:
                 if needle is None:
                     found.append((case, []))
                     continue
-                matches = [event for event in case.events if needle in (_searchable(event.comment) or "")]
+                matches = [
+                    event
+                    for event in case.events
+                    if any(needle in (_searchable(text) or "") for text in (event.comment, event.details.get("remark")))
+                ]
                 if matches:
                     found.append((case, matches))
             found.sort(key=lambda item: item[0].updated_at, reverse=True)
@@ -1642,12 +1647,7 @@ class QCStore:
         remark = _check_remark(remark)
         with self._lock:
             case = self._admin_case(subject_key)
-            if revision is not None and case.revision != revision:
-                raise QCError(
-                    f"Subject {subject_key} changed after you listed it; it now waits for "
-                    f"{_STAGE_WAITS_FOR[case.stage]}. Look at it again before approving it.",
-                    status_code=409,
-                )
+            _check_revision(case, revision, "approving it")
             if case.stage != workflow.APPROVAL and not allow_unaccepted:
                 raise QCError(
                     f"Subject {subject_key} is not waiting for approval: it waits for {_STAGE_WAITS_FOR[case.stage]}.",
@@ -1825,69 +1825,133 @@ class QCStore:
             with self._lock:
                 subject_keys = sorted(k for k, case in self._cases.items() if case.stage == workflow.APPROVAL)
         revisions = revisions or {}
+
+        def approve(key: str) -> dict:
+            outcome = self.approve(key, remark, allow_unaccepted, revisions.get(key))
+            return {"message": outcome.message, "remark_added": outcome.remark_added}
+
+        return self._for_each(subject_keys, "approved", "Approving", approve)
+
+    def return_all(
+        self,
+        subject_keys: Iterable[str],
+        to: str,
+        comment: str | None = None,
+        remark: str | None = None,
+        revisions: dict[str, int] | None = None,
+    ) -> list[dict]:
+        """Send each subject named back, as :meth:`return_case` does; one that cannot be is
+        reported and the rest go ahead. ``revisions`` is as for :meth:`approve_all`."""
+        _check_destination(to)  # what is asked wrongly is refused before anything is sent back
+        _check_comment(comment)
+        _check_remark(remark)
+        revisions = revisions or {}
+
+        def send(key: str) -> dict:
+            case = self.return_case(key, to, comment, remark=remark, revision=revisions.get(key))
+            return {"remark_added": case.events[-1].details.get("remark_added", False)}
+
+        return self._for_each(subject_keys, "returned", "Sending back", send)
+
+    def close_all(
+        self, subject_keys: Iterable[str], remark: str | None = None, revisions: dict[str, int] | None = None
+    ) -> list[dict]:
+        """Close each subject named, as :meth:`close_case` does; one that cannot be closed is
+        reported and the rest go ahead. ``revisions`` is as for :meth:`approve_all`."""
+        _check_remark(remark)  # a remark too long is refused before anything is closed
+        revisions = revisions or {}
+
+        def close(key: str) -> dict:
+            case = self.close_case(key, remark=remark, revision=revisions.get(key))
+            return {"remark_added": case.events[-1].details.get("remark_added", False)}
+
+        return self._for_each(subject_keys, "closed", "Closing", close)
+
+    def _for_each(self, subject_keys: Iterable[str], done: str, doing: str, act) -> list[dict]:
+        """Do ``act`` to each subject: ``{"subject_key": ..., done: True}`` with what it returns,
+        or, for one it fails for, ``done: False`` with the reason, and the rest go ahead."""
         results = []
         for key in subject_keys:
             try:
-                outcome = self.approve(key, remark, allow_unaccepted, revisions.get(key))
-                results.append(
-                    {
-                        "subject_key": key,
-                        "approved": True,
-                        "message": outcome.message,
-                        "remark_added": outcome.remark_added,
-                    }
-                )
+                results.append({"subject_key": key, done: True, **act(key)})
             except QCError as exc:
-                results.append({"subject_key": key, "approved": False, "message": exc.message})
+                results.append({"subject_key": key, done: False, "message": exc.message})
             except Exception as exc:  # the share, for one subject, need not stop the others
-                self.audit.event(f"Approving {key} failed: {exc!r}", level=logging.ERROR)
-                results.append({"subject_key": key, "approved": False, "message": f"Could not be written: {exc}"})
+                self.audit.event(f"{doing} {key} failed: {exc!r}", level=logging.ERROR)
+                results.append({"subject_key": key, done: False, "message": f"Could not be written: {exc}"})
         return results
 
-    def return_case(self, subject_key: str, to: str, comment: str | None = None) -> Case:
+    def return_case(
+        self,
+        subject_key: str,
+        to: str,
+        comment: str | None = None,
+        remark: str | None = None,
+        revision: int | None = None,
+    ) -> Case:
         """Send a subject back, to the reviewers (every verdict is reviewed again) or to the
-        editors (with the administrator's word). Reopens a closed subject."""
-        if to not in (workflow.REVIEW, workflow.EDIT):
-            raise QCError(f"A subject goes back to 'review' or to 'edit', not to '{to}'.")
-        comment = (comment or "").strip() or None
+        editors (with the administrator's word, the ``comment``). Reopens a closed subject.
+        ``remark`` is added to the subject's remarks in Subject_info at once, and nothing else is
+        written; ``revision`` is as for :meth:`approve`."""
+        _check_destination(to)
+        comment = _check_comment(comment)
+        remark = _check_remark(remark)
         with self._lock:
             case = self._admin_case(subject_key)
-            now = utc_now_iso()
-            if to == workflow.REVIEW:
-                workflow.return_to_review(case, comment, now)
-            else:
-                workflow.return_to_edit(case, comment, now)
-            self._save_cases()
-            snapshot = case.model_copy(deep=True)
+            _check_revision(case, revision, "sending it back")
+            self._applying.add(subject_key)
+            dataset_id, subject_id = case.dataset_id, case.subject_id
+        try:
+            remark_added = self._add_remark(dataset_id, subject_id, remark)
+            with self._lock:
+                case = self._cases[subject_key]
+                send = workflow.return_to_review if to == workflow.REVIEW else workflow.return_to_edit
+                send(case, comment, utc_now_iso(), remark=remark, remark_added=remark_added)
+                self._save_cases()
+                snapshot = case.model_copy(deep=True)
+        finally:
+            with self._lock:
+                self._applying.discard(subject_key)
         self.audit.record(
             "returned",
-            {"subject_key": subject_key, "to": to, "stage": snapshot.stage, "comment": comment},
+            {
+                "subject_key": subject_key,
+                "to": to,
+                "stage": snapshot.stage,
+                "comment": comment,
+                "remark": remark,
+                "remark_added": remark_added,
+            },
+            dataset_id=dataset_id if remark_added else None,
             summary=(
                 f"Subject {subject_key} sent back to the {'reviewers' if to == workflow.REVIEW else 'editors'} by the "
                 f"administrator; it waits for {_STAGE_WAITS_FOR[snapshot.stage]}."
+                + (f" '{remark}' added to its remarks." if remark_added else "")
+                + (f" Its remarks said '{remark}' already." if remark and not remark_added else "")
                 + (f" Comment: {comment}" if comment else "")
             ),
         )
         return snapshot
 
-    def close_case(self, subject_key: str, comment: str | None = None, remark: str | None = None) -> Case:
+    def close_case(
+        self, subject_key: str, comment: str | None = None, remark: str | None = None, revision: int | None = None
+    ) -> Case:
         """Finish a subject's quality check without writing its labels or segmentation into the
         dataset. ``remark`` is added to the subject's remarks in Subject_info, as for an
         approval: how a rejected subject is recorded. The ``comment`` is kept in its history,
-        the remark when there is none. It is not handed out again, unless it is sent back."""
-        comment = (comment or "").strip() or None
+        the remark when there is none. It is not handed out again, unless it is sent back.
+        ``revision`` is as for :meth:`approve`."""
+        comment = _check_comment(comment)
         remark = _check_remark(remark)
         with self._lock:
             case = self._admin_case(subject_key)
+            _check_revision(case, revision, "closing it")
             if case.stage == workflow.CLOSED:
                 raise QCError(f"Subject {subject_key} is closed already.", status_code=409)
             self._applying.add(subject_key)
             dataset_id, subject_id = case.dataset_id, case.subject_id
         try:
-            remark_added = False
-            if remark is not None:
-                with self._dataset_lock:
-                    remark_added = self._add_remark(dataset_id, subject_id, remark)
+            remark_added = self._add_remark(dataset_id, subject_id, remark)
             with self._lock:
                 case = self._cases[subject_key]
                 workflow.close(case, comment or remark, utc_now_iso(), remark=remark, remark_added=remark_added)
@@ -1911,10 +1975,11 @@ class QCStore:
         )
         return snapshot
 
-    def _add_remark(self, dataset_id: int, subject_id: int, remark: str) -> bool:
-        """Caller holds the dataset lock. Add ``remark`` to the subject's remarks in Subject_info;
-        False when they say so already, and nothing is written."""
-        self._require_compatible_dataset(dataset_id)
+    def _add_remark(self, dataset_id: int, subject_id: int, remark: str | None) -> bool:
+        """Add ``remark`` to the subject's remarks in Subject_info; False when there is none or
+        they say so already, and nothing is written."""
+        if remark is None:
+            return False
         added = False
 
         def apply(subject: SubjectInfo) -> None:
@@ -1924,8 +1989,10 @@ class QCStore:
                 subject.remarks = remarks
                 added = True
 
-        if workflow.with_remark(self.subject_info(dataset_id, subject_id).remarks, remark) is not None:
-            self._mutate_subject_info(dataset_id, subject_id, apply)
+        with self._dataset_lock:
+            self._require_compatible_dataset(dataset_id)
+            if workflow.with_remark(self.subject_info(dataset_id, subject_id).remarks, remark) is not None:
+                self._mutate_subject_info(dataset_id, subject_id, apply)
         return added
 
     def _admin_case(self, subject_key: str) -> Case:
@@ -1937,7 +2004,7 @@ class QCStore:
         if case.stage == workflow.APPLIED:
             raise QCError(f"Subject {subject_key} is approved and in the dataset already.", status_code=409)
         if subject_key in self._applying:
-            raise QCError(f"Subject {subject_key} is being approved or closed right now.", status_code=409)
+            raise QCError(f"Subject {subject_key} is being approved, closed or sent back right now.", status_code=409)
         self._expire_stale_assignments()
         holder = next(
             (a.user for a in self._assignments.values() if a.subject_key == subject_key and a.state == "assigned"),
@@ -2068,6 +2135,28 @@ def _check_remark(remark: str | None) -> str | None:
     if tagged is not None and len(tagged) > MAX_REMARK_LENGTH:
         raise QCError(f"A remark is at most {MAX_REMARK_LENGTH} characters long; this one has {len(tagged)}.")
     return tagged
+
+
+def _check_comment(comment: str | None) -> str | None:
+    """The administrator's comment, trimmed, or None when blank."""
+    if comment is not None and not isinstance(comment, str):
+        raise QCError("A comment is text.")
+    return (comment or "").strip() or None
+
+
+def _check_destination(to: str) -> None:
+    if to not in (workflow.REVIEW, workflow.EDIT):
+        raise QCError(f"A subject goes back to 'review' or to 'edit', not to '{to}'.")
+
+
+def _check_revision(case: Case, revision: int | None, doing: str) -> None:
+    """Refuse to act on a case that changed after the administrator saw it at ``revision``."""
+    if revision is not None and case.revision != revision:
+        raise QCError(
+            f"Subject {case.subject_key} changed after you listed it; it now waits for "
+            f"{_STAGE_WAITS_FOR[case.stage]}. Look at it again before {doing}.",
+            status_code=409,
+        )
 
 
 def _searchable(text: str | None) -> str | None:

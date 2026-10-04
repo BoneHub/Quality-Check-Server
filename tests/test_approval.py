@@ -580,6 +580,85 @@ class AdminActionTests(ApprovalTestCase):
             self.store.return_case(KEY, "approval")
         self.assertEqual(ctx.exception.status_code, 400)
 
+    def test_a_subject_sent_back_gets_the_remark_at_once_and_the_editors_the_comment(self):
+        self.review(self.store, self.rita)
+        case = self.store.return_case(KEY, "edit", "the femoral heads are too small", remark="Hip implant")
+        self.assertEqual(self.remarks(), "QC: Hip implant")
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.original)
+        step = case.events[-1]
+        self.assertEqual(step.comment, "the femoral heads are too small")
+        self.assertEqual(step.details, {"to": "edit", "remark": "QC: Hip implant", "remark_added": True})
+        self.assertEqual(case.requests[0].comment, "the femoral heads are too small")
+        self.assertIn("'QC: Hip implant' added to its remarks", self.builder.dataset_log(1).read_text(encoding="utf-8"))
+
+    def test_a_subject_that_changed_since_it_was_listed_is_left_alone(self):
+        self.review(self.store, self.rita)
+        listed = self.store.case_of(KEY).revision
+        self.store.return_case(KEY, "review")
+        for act in (
+            lambda: self.store.close_case(KEY, remark="Hip implant", revision=listed),
+            lambda: self.store.return_case(KEY, "edit", remark="Hip implant", revision=listed),
+        ):
+            with self.assertRaises(QCError) as ctx:
+                act()
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertIn("changed after you listed it", ctx.exception.message)
+        self.assertEqual(self.store.case_of(KEY).stage, "review")
+        self.assertIsNone(self.remarks())
+
+
+class TickedSubjectTests(ApprovalTestCase):
+    """Closing and sending back several subjects at once, as the admin panel's ticks do."""
+
+    def prepare(self) -> None:
+        super().prepare()
+        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.review(self.store, self.rita)  # subject 1 waits for approval
+        self.review(self.store, self.rita)  # and so does subject 2
+
+    def test_each_is_closed_with_the_remark_and_one_that_cannot_be_is_reported(self):
+        self.store.close_case("001_000002")
+        results = self.store.close_all([KEY, "001_000002"], remark="Cropped")
+        self.assertEqual([(r["subject_key"], r["closed"]) for r in results], [(KEY, True), ("001_000002", False)])
+        self.assertTrue(results[0]["remark_added"])
+        self.assertIn("closed already", results[1]["message"])
+        self.assertEqual(self.remarks(), "QC: Cropped")
+        self.assertNotIn("remarks", self.builder.subject_info(1, 2))
+
+    def test_each_is_sent_back_with_the_comment_and_the_remark(self):
+        results = self.store.return_all([KEY, "001_000002"], "edit", "check the femoral heads", remark="Hip implant")
+        self.assertEqual([(r["returned"], r["remark_added"]) for r in results], [(True, True), (True, True)])
+        for key in (KEY, "001_000002"):
+            case = self.store.case_of(key)
+            self.assertEqual((case.stage, case.requests[0].comment), ("edit", "check the femoral heads"))
+        self.assertEqual(self.remarks(), "QC: Hip implant")
+        self.assertEqual(self.builder.subject_info(1, 2)["remarks"], "QC: Hip implant")
+
+    def test_one_that_changed_since_it_was_listed_is_left_out(self):
+        listed = {key: self.store.case_of(key).revision for key in (KEY, "001_000002")}
+        self.store.return_case("001_000002", "review")
+        results = self.store.return_all([KEY, "001_000002"], "review", remark="Hip implant", revisions=listed)
+        self.assertEqual([r["returned"] for r in results], [True, False])
+        self.assertIn("changed after you listed it", results[1]["message"])
+        self.assertNotIn("remarks", self.builder.subject_info(1, 2))
+
+    def test_what_is_asked_wrongly_is_refused_before_anything_is_done(self):
+        for act in (
+            lambda: self.store.return_all([KEY], "approval"),
+            lambda: self.store.return_all([KEY], "edit", comment=5),
+            lambda: self.store.return_all([KEY], "edit", remark="x" * 600),
+            lambda: self.store.close_all([KEY], remark="x" * 600),
+        ):
+            with self.assertRaises(QCError) as ctx:
+                act()
+            self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(self.store.case_of(KEY).stage, "approval")
+        self.assertIsNone(self.remarks())
+
 
 class RejectedSubjectTests(ApprovalTestCase):
     """A subject a reviewer rejected as a whole: the administrator records why."""
@@ -739,6 +818,54 @@ class AdminApiTests(ApiTestCase):
         self.assertNotIn("remarks", self.builder.subject_info(1, 2))
         other = self.client.get("/admin/api/cases/001_000002", headers=self.admin_headers).json()
         self.assertEqual(other["stage"], "approval")
+
+    def test_ticked_subjects_are_sent_back_or_closed_with_a_remark(self):
+        self.accept(self.alice_key)
+        self.accept(self.bob_key)
+        cases = self.client.get("/admin/api/cases", headers=self.admin_headers).json()
+        listed = {case["subject_key"]: case["revision"] for case in cases}
+        sent = self.client.post(
+            "/admin/api/cases/return",
+            json={"subject_keys": [KEY], "to": "edit", "comment": "redo", "remark": "Hip implant", "revisions": listed},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(sent.status_code, 200, sent.text)
+        self.assertEqual((sent.json()["returned"], sent.json()["results"][0]["remark_added"]), (1, True))
+        self.assertEqual(self.builder.subject_info(1, 1)["remarks"], "QC: Hip implant")
+        closed = self.client.post(
+            "/admin/api/cases/close",
+            json={"subject_keys": [KEY, "001_000002"], "remark": "Cropped", "revisions": listed},
+            headers=self.admin_headers,
+        ).json()
+        self.assertEqual(closed["closed"], 1)
+        self.assertEqual([r["closed"] for r in closed["results"]], [False, True], "the first changed after it was listed")
+        self.assertEqual(self.builder.subject_info(1, 2)["remarks"], "QC: Cropped")
+        self.assertEqual(self.builder.subject_info(1, 2)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+
+    def test_sending_back_or_closing_asked_for_wrongly_is_refused(self):
+        self.accept(self.alice_key)
+        for path, body in (
+            ("close", {}),
+            ("close", {"subject_keys": KEY}),
+            ("close", {"subject_keys": [KEY], "revisions": [1]}),
+            ("return", {"subject_keys": [KEY], "to": "nowhere"}),
+            ("return", {"subject_keys": [KEY], "to": "edit", "comment": 5}),
+            ("return", {"subject_keys": [KEY], "to": "edit", "remark": 5}),
+        ):
+            response = self.client.post(f"/admin/api/cases/{path}", json=body, headers=self.admin_headers)
+            self.assertEqual(response.status_code, 400, (path, body))
+        self.assertEqual(self.client.get(f"/admin/api/cases/{KEY}", headers=self.admin_headers).json()["stage"], "approval")
+
+    def test_a_remark_is_found_like_a_comment(self):
+        self.accept(self.alice_key)
+        self.client.post(
+            f"/admin/api/cases/{KEY}/return", json={"to": "edit", "comment": "redo the heads", "remark": "Hip implant"},
+            headers=self.admin_headers,
+        )
+        listed = self.client.get("/admin/api/cases?comment=implant", headers=self.admin_headers).json()
+        self.assertEqual(
+            [(step["action"], step["details"]["remark"]) for step in listed[0]["matches"]], [("return", "QC: Hip implant")]
+        )
 
     def test_a_subject_not_waiting_for_approval_is_approved_only_when_asked_for(self):
         self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"], comment="hip implant")

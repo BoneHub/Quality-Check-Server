@@ -144,14 +144,16 @@ class PageContractTests(unittest.TestCase):
         self.assertIn("edits_need_review", saved)
         self.assertEqual(saved - set(QCServerConfig.model_fields), set())
 
-    def test_the_admin_panel_approves_through_the_case_endpoints(self):
+    def test_the_admin_panel_acts_through_the_case_endpoints(self):
         page = self.read("admin.html")
-        for endpoint in ('"/admin/api/cases/approve"', '"/approve"', '"/return"', '"/close"', '"/segmentation"'):
+        for endpoint in (
+            '"/admin/api/cases/approve"', '"/admin/api/cases/close"', '"/admin/api/cases/return"', '"/segmentation"'
+        ):
             self.assertIn(endpoint, page)
 
-    def test_the_admin_panel_filters_and_approves_with_the_names_the_server_reads(self):
+    def test_the_admin_panel_filters_and_acts_with_the_names_the_server_reads(self):
         page = self.read("admin.html")
-        for name in ('"&comment="', "subject_keys:", "remark:", "allow_unaccepted:", "revisions:"):
+        for name in ('"&comment="', "subject_keys:", "remark:", "allow_unaccepted:", "revisions:", "to:", "comment:"):
             self.assertIn(name, page)
 
 
