@@ -350,17 +350,56 @@ class EditsNeedNoReviewTests(WorkflowTestCase):
         self.assertEqual(outcome.stage, "review")
         self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "pending"})
 
-    def test_a_label_nobody_reviewed_still_waits_for_a_reviewer(self):
-        """An editor's word counts for what they corrected, not for a review nobody gave."""
+    def test_a_label_nobody_reviewed_is_accepted_on_the_editors_word(self):
+        """Nobody else has given it a verdict, so the editor's is the one it gets."""
         self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
         store = self.make_store(edits_need_review=False)
         # rita judged subject 1 in setUp; on subject 2 she only reports a missing bone.
         self.review(store, self.rita, accepted=["FEMUR_LEFT"], missing=["TIBIA_LEFT"])
         self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # subject 1
         outcome = self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])  # subject 2
-        self.assertEqual(outcome.stage, "review")
+        self.assertEqual(outcome.stage, "approval")
+        self.assertEqual(outcome.accepted_labels, ["FEMUR_RIGHT", "TIBIA_LEFT"])
+        self.assertEqual(outcome.edited_labels, ["TIBIA_LEFT"])
+        labels = store.case_of("001_000002").labels
+        self.assertEqual({name: (label.state, label.by) for name, label in labels.items()},
+                         {"FEMUR_LEFT": ("accepted", "rita"), "FEMUR_RIGHT": ("accepted", "eddie"),
+                          "TIBIA_LEFT": ("accepted", "eddie")})
+        self.assertIsNone(labels["FEMUR_RIGHT"].edited_by, "eddie did not change it")
+
+    def test_a_rejected_subject_the_administrator_sends_to_an_editor_goes_to_approval(self):
+        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        store = self.make_store(edits_need_review=False)
+        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # subject 1
+        assignment = store.next_subject(self.rita, REVIEWER)
+        store.submit(assignment.assignment_id, self.rita, False, None, comment="leg cropped")
+        store.return_case("001_000002", "edit", comment="fix it anyway")
+        outcome = self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_LEFT"])
+        self.assertEqual(outcome.stage, "approval")
         states = {name: label.state for name, label in store.case_of("001_000002").labels.items()}
-        self.assertEqual(states, {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "pending", "TIBIA_LEFT": "accepted"})
+        self.assertEqual(states, {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "accepted"})
+
+    def test_a_label_nobody_reviewed_that_the_editor_does_not_vouch_for_waits_for_a_reviewer(self):
+        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        store = self.make_store(edits_need_review=False)
+        self.review(store, self.rita, accepted=["FEMUR_LEFT"], missing=["TIBIA_LEFT"])  # subject 2
+        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # subject 1
+        outcome = self.edit(
+            store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"], confirmed=["FEMUR_LEFT", "TIBIA_LEFT"]
+        )
+        self.assertEqual(outcome.stage, "review")
+        self.assertEqual(store.case_of("001_000002").labels["FEMUR_RIGHT"].state, "pending")
+
+    def test_a_removal_waiting_for_a_reviewer_is_final_once_an_editor_leaves_the_label_out(self):
+        """The administrator sent the subject to the reviewers, then to the editors."""
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT"])
+        self.store.return_case(KEY, "review")
+        self.store.return_case(KEY, "edit")
+        label = self.case().labels["FEMUR_RIGHT"]
+        self.assertEqual((label.state, label.painted), ("pending", False))
+        outcome = self.edit(self.store, self.eddie, ["FEMUR_LEFT"])
+        self.assertEqual(outcome.stage, "approval")
+        self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "removed"})
 
 
 class MissingBoneTests(WorkflowTestCase):

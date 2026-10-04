@@ -111,8 +111,8 @@ class QCServerConfig(BaseModel):
     edits_need_review: bool = Field(
         True,
         description=(
-            "Send the labels an editor corrected back to the reviewers. Off, the corrected labels the editor "
-            "vouches for are accepted as they are and wait for the administrator's approval."
+            "Send the labels an editor corrected back to the reviewers. Off, the labels the editor vouches for "
+            "are accepted as they are and wait for the administrator's approval."
         ),
     )
     mark_removed_labels_absent: bool = Field(

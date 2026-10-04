@@ -36,9 +36,11 @@ An editor's upload replaces the segmentation. A label whose voxels it changed, o
 and one a reviewer had rejected are *edited*: they go back to ``pending`` -- or, when edits
 need no review, to ``accepted`` if the editor vouches for them. A label the upload left alone
 keeps its state, so a correction that spills into an accepted neighbour takes the
-neighbour's acceptance away, and one that does not leaves it. A label the upload takes away
-is removed; when edits need review, a reviewer must agree first. A label nobody has reviewed
-stays ``pending`` until a reviewer has: an editor's word is not a review.
+neighbour's acceptance away, and one that does not leaves it -- except that, when edits need
+no review, one still ``pending`` is accepted if the editor vouches for it: nobody else has
+given it a verdict. A label the upload takes away is removed; when edits need review, a
+reviewer must agree first. So when edits need no review, a correction goes straight to
+approval, unless the editor declines to vouch for a label.
 
 The administrator may approve a case at any stage, not only once it waits for approval: the
 labels a reviewer accepted then become reviewed, and the labels nobody accepted keep the
@@ -213,11 +215,12 @@ def apply_edit(
 
     ``changed`` are the labels whose voxels the upload changed, or None when that could not
     be told, and every label counts as changed. ``vouched`` are the labels the editor vouches
-    for, which counts only for labels they edited, and only when edits need no review.
-    Requests are resolved: the editor has seen them, whatever they did about them.
+    for, which counts only when edits need no review, and only for labels they edited or
+    that nobody has given a verdict on. Requests are resolved: the editor has seen them,
+    whatever they did about them.
     """
     present = set(present)
-    vouched = set(vouched)
+    vouched = set(vouched) if not edits_need_review else set()
     edited, accepted, removed = [], [], []
     for name in sorted(present):
         before = case.labels.get(name)
@@ -225,9 +228,13 @@ def apply_edit(
             changed is None or name in changed or before is None or not before.painted or before.state == REJECTED
         )
         if not touched:
+            if before.state == PENDING and name in vouched:
+                # Nobody has given it a verdict: the editor's word is the one it gets.
+                case.labels[name] = CaseLabel(state=ACCEPTED, by=editor, at=now, edited_by=before.edited_by)
+                accepted.append(name)
             continue
         edited.append(name)
-        if not edits_need_review and name in vouched:
+        if name in vouched:
             case.labels[name] = CaseLabel(state=ACCEPTED, by=editor, at=now, edited_by=editor)
             accepted.append(name)
         else:
@@ -241,8 +248,9 @@ def apply_edit(
             state = PENDING if edits_need_review else REMOVED
             case.labels[name] = CaseLabel(state=state, painted=False, by=editor if state == REMOVED else None,
                                           at=now, edited_by=editor)
-        elif before.state == REJECTED:
-            # Reported missing, and not added: the editor disagreed, and a reviewer must see that.
+        elif before.state in (REJECTED, PENDING):
+            # Reported missing, or its removal waits for a reviewer, and not in the upload: a
+            # reviewer must see that the editor left it out, when edits need review.
             state = PENDING if edits_need_review else REMOVED
             case.labels[name] = CaseLabel(state=state, painted=False, by=editor if state == REMOVED else None,
                                           at=now, edited_by=editor)

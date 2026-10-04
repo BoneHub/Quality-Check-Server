@@ -453,15 +453,16 @@ This is the **Editors' corrections go back to a reviewer** setting.
 **On (default, safest).** Every label an editor changed, added or fixed goes back to a
 reviewer before you can approve it.
 
-**Off (faster).** 3D Slicer shows a tick box next to each label, ticked by default:
+**Off (faster).** 3D Slicer shows a tick box next to each label, ticked by default. An
+editor's correction goes straight to approval, unless the editor unticks a label:
 
-- a label the editor changed and left **ticked** is accepted on the editor's word, and the
-  subject can go straight to approval;
-- a label the editor changed and **unticked** still goes to a reviewer;
+- a label the editor changed, or one nobody has reviewed yet (for example in a subject a
+  reviewer rejected and you sent to the editors), is accepted on the editor's word when
+  left **ticked**;
+- such a label left **unticked** still goes to a reviewer;
 - a label the editor removed is removed without a reviewer, and a missing bone the editor did
   not add stays out;
-- a label that nobody has reviewed yet still needs a reviewer. An editor's word is not a
-  review.
+- a label a reviewer has already accepted keeps that verdict.
 
 > **Editors must reconnect after you change this setting.** 3D Slicer reads it only when the
 > editor presses **Connect**. Until they disconnect and connect again, Slicer works with the old
@@ -582,7 +583,9 @@ The server compares the correction with the segmentation it replaces, voxel by v
   or are accepted when [corrections need no review](#should-corrections-go-back-to-a-reviewer)
   and the editor ticked them.
 - **Labels the editor did not touch** keep their verdict. If a correction spills into an
-  accepted neighbouring bone, that neighbour loses its acceptance and is reviewed again.
+  accepted neighbouring bone, that neighbour loses its acceptance and is reviewed again. One
+  that nobody has reviewed yet is accepted when corrections need no review and the editor
+  ticked it.
 - **Labels the editor deleted** are removed. When corrections need review, a reviewer must
   agree first: they agree by accepting the removal, and undo it by reporting the bone missing.
 - **A bone reported missing that the editor did not add** goes back to a reviewer, when
@@ -814,7 +817,6 @@ review.**
 - The editor has not reconnected in 3D Slicer since you changed it. Slicer reads the setting
   only at **Connect**.
 - The editor unticked those labels.
-- The labels had never been reviewed. They always need a reviewer.
 
 **A setting I changed in the panel came back after a restart.**
 `.env` sets it. Blank it there to manage it from the panel, then run `docker compose up -d`.
