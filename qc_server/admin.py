@@ -2,7 +2,8 @@
 
 Reviewers' and editors' verdicts wait in the server's state folder. The administrator
 approves a subject whose labels are all accepted, which writes it into the dataset, or sends
-it back to the reviewers or the editors, or closes it without writing anything.
+it back to the reviewers or the editors, or closes it without writing its labels -- with a
+remark for its Subject_info, for one a reviewer rejected as a whole.
 
 Authentication is the server's admin key, sent as an ``X-Admin-Key`` header. The panel at
 ``/admin`` is a single static page that asks for the key once and keeps it in the
@@ -161,7 +162,7 @@ def cases(
     stage: str | None = None, limit: int = 500, comment: str | None = None, store: QCStore = Depends(require_admin)
 ) -> list[dict]:
     """The subjects with a verdict on this server, most recently changed first. ``stage`` takes
-    one stage or several, comma-separated: review, edit, approval, escalated, applied, closed.
+    one stage or several, comma-separated: review, edit, approval, escalated, rejected, applied, closed.
     ``comment`` keeps the subjects with a comment that contains it, ignoring case, each with the
     steps whose comment does in ``matches``."""
     stages = [s.strip() for s in stage.split(",") if s.strip()] if stage else None
@@ -242,8 +243,11 @@ def return_case(subject_key: str, payload: dict, store: QCStore = Depends(requir
 
 @router.post("/api/cases/{subject_key}/close")
 def close_case(subject_key: str, payload: dict | None = None, store: QCStore = Depends(require_admin)) -> dict:
-    """Finish a subject's quality check without writing anything into the dataset."""
-    return store.close_case(subject_key, (payload or {}).get("comment")).model_dump()
+    """Finish a subject's quality check without writing its labels or segmentation into the
+    dataset. ``remark`` is added to its remarks in Subject_info, as ``QC: <remark>``: how a
+    subject a reviewer rejected is recorded."""
+    payload = payload or {}
+    return store.close_case(subject_key, payload.get("comment"), remark=payload.get("remark")).model_dump()
 
 
 @router.post("/api/refresh-index")

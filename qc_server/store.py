@@ -125,6 +125,7 @@ _STAGE_WAITS_FOR = {
     workflow.EDIT: "an editor",
     workflow.APPROVAL: "the administrator's approval",
     workflow.ESCALATED: "the administrator",
+    workflow.REJECTED_SUBJECT: "the administrator, as a reviewer rejected the subject",
     workflow.APPLIED: "nothing: it is approved and in the dataset",
     workflow.CLOSED: "nothing: the administrator closed it",
 }
@@ -1129,8 +1130,9 @@ class QCStore:
 
         * a reviewer judges the segmentation as it is (``use_stored_segmentation``), label by
           label: ``confirmed_labels`` accepted, ``rejected_labels`` rejected, for an editor to
-          correct or take out, and ``missing_labels`` reported missing, for an editor to add. ``quality_check_confirmed=False`` rejects every
-          label under review.
+          correct or take out, and ``missing_labels`` reported missing, for an editor to add.
+          ``quality_check_confirmed=False`` rejects the subject as a whole: it goes to the
+          administrator, not to the editors, and its labels stay as they were.
         * an editor uploads the corrected segmentation (``segmentation_tmp_path``), vouching for
           ``confirmed_labels``. ``quality_check_confirmed=False`` sends the subject to the
           administrator.
@@ -1196,8 +1198,7 @@ class QCStore:
         if confirmed and upload is not None and not user.is_editor:
             raise QCError(
                 f"'{user.name}' is not an editor, so cannot upload a segmentation: segmentations are corrected "
-                "in 3D Slicer, by an editor. Accept or reject each label of the segmentation as it is instead, "
-                "or reject the subject with a comment.",
+                "in 3D Slicer, by an editor. Accept or reject each label of the segmentation as it is instead.",
                 status_code=403,
             )
         if (confirmed and use_stored or judges_labels) and not user.is_reviewer:
@@ -1242,48 +1243,44 @@ class QCStore:
                 status_code=409,
             )
         case, revision = self._case_for_verdict(assignment, workflow.REVIEW)
-        painted = set(workflow.painted_labels(case))
-        request_edit = not confirmed
         if not confirmed:
-            # The subject as a whole: whatever is under review goes to the editors.
-            accepted = []
-            rejected = workflow.labels_in(case, workflow.PENDING)
+            return self._reject_subject(assignment, user, case, revision, comment)
+        painted = set(workflow.painted_labels(case))
+        if not use_stored:
+            raise QCError(
+                "A reviewer's verdict is about the segmentation as it is: set use_stored_segmentation. A "
+                "confirmed submission with a corrected segmentation file takes an editor, in 3D Slicer."
+            )
+        _check_label_names([*(confirmed_labels or []), *rejected, *missing])
+        already = sorted(name for name in missing if name in painted)
+        if already:
+            raise QCError(
+                f"These labels are in the segmentation of {key} already: {already}. Reject them if something "
+                "is wrong with them; 'missing' is for bones the segmentation lacks."
+            )
+        not_there = sorted(name for name in rejected if name not in painted)
+        if not_there:
+            raise QCError(
+                f"These rejected labels are not in the segmentation of {key}: {not_there}. Report a bone the "
+                "segmentation lacks as missing."
+            )
+        rejected = sorted({*rejected, *missing})
+        if confirmed_labels is None:
+            # Accepting "the subject" accepts what is under review, not what the dataset has
+            # as reviewed already.
+            accepted = sorted(set(workflow.labels_in(case, workflow.PENDING)) - set(rejected))
         else:
-            if not use_stored:
-                raise QCError(
-                    "A reviewer's verdict is about the segmentation as it is: set use_stored_segmentation. A "
-                    "confirmed submission with a corrected segmentation file takes an editor, in 3D Slicer."
-                )
-            _check_label_names([*(confirmed_labels or []), *rejected, *missing])
-            already = sorted(name for name in missing if name in painted)
-            if already:
-                raise QCError(
-                    f"These labels are in the segmentation of {key} already: {already}. Reject them if something "
-                    "is wrong with them; 'missing' is for bones the segmentation lacks."
-                )
-            not_there = sorted(name for name in rejected if name not in painted)
-            if not_there:
-                raise QCError(
-                    f"These rejected labels are not in the segmentation of {key}: {not_there}. Report a bone the "
-                    "segmentation lacks as missing."
-                )
-            rejected = sorted({*rejected, *missing})
-            if confirmed_labels is None:
-                # Accepting "the subject" accepts what is under review, not what the dataset has
-                # as reviewed already.
-                accepted = sorted(set(workflow.labels_in(case, workflow.PENDING)) - set(rejected))
-            else:
-                accepted = sorted(set(confirmed_labels))
-            unknown = [name for name in accepted if name not in case.labels]
-            if unknown:
-                raise QCError(f"These confirmed labels are not present in the stored segmentation: {unknown}.")
-            both = sorted(set(accepted) & set(rejected))
-            if both:
-                raise QCError(f"These labels are both accepted and rejected: {both}.")
-            if not (accepted or rejected) and workflow.labels_in(case, workflow.PENDING):
-                raise QCError(
-                    "The verdict judges no label: accept or reject the labels under review, or report a missing one."
-                )
+            accepted = sorted(set(confirmed_labels))
+        unknown = [name for name in accepted if name not in case.labels]
+        if unknown:
+            raise QCError(f"These confirmed labels are not present in the stored segmentation: {unknown}.")
+        both = sorted(set(accepted) & set(rejected))
+        if both:
+            raise QCError(f"These labels are both accepted and rejected: {both}.")
+        if not (accepted or rejected) and workflow.labels_in(case, workflow.PENDING):
+            raise QCError(
+                "The verdict judges no label: accept or reject the labels under review, or report a missing one."
+            )
 
         # Accepting a painted label vouches for the segmentation as it is, so it is held to the
         # same rules as an upload. That reads the whole file, before the lock is taken.
@@ -1292,7 +1289,8 @@ class QCStore:
             if path is not None and not user.receives_segmentation:
                 raise QCError(
                     f"'{user.name}' is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}, so cannot accept labels of "
-                    f"the segmentation of {key}, which they have not seen. Reject the subject with a comment instead.",
+                    f"the segmentation of {key}, which they have not seen. Reject its labels with a comment instead, "
+                    "or release it.",
                     status_code=403,
                 )
             if path is None:
@@ -1317,9 +1315,7 @@ class QCStore:
         with self._lock:
             live = self._check_turn(assignment, revision)
             case = live if live is not None else case
-            details = workflow.apply_review(
-                case, user.name, accepted, rejected, comment, assignment.assignment_id, now, request_edit
-            )
+            details = workflow.apply_review(case, user.name, accepted, rejected, comment, assignment.assignment_id, now)
             self._cases[key] = case
             self._save_cases()
             self._finish_assignment(
@@ -1353,10 +1349,38 @@ class QCStore:
         self._record_submission(
             outcome,
             user,
-            f"Subject {key} reviewed by '{user.name}'"
-            + (" (the subject as a whole rejected)" if not confirmed else "")
-            + f": {'; '.join(verdict) or 'no label judged'}. It now waits for {_STAGE_WAITS_FOR[snapshot.stage]}.",
+            f"Subject {key} reviewed by '{user.name}': {'; '.join(verdict) or 'no label judged'}. "
+            f"It now waits for {_STAGE_WAITS_FOR[snapshot.stage]}.",
             comment,
+        )
+        return outcome
+
+    def _reject_subject(
+        self, assignment: Assignment, user: User, case: Case, revision: int, comment: str | None
+    ) -> "SubmissionOutcome":
+        """A reviewer rejected the subject as a whole: no correction of its segmentation would
+        help. It goes to the administrator, and its labels stay as they were."""
+        key = assignment.subject_key
+        now = utc_now_iso()
+        with self._lock:
+            live = self._check_turn(assignment, revision)
+            case = live if live is not None else case
+            workflow.reject_subject(case, user.name, comment, assignment.assignment_id, now)
+            self._cases[key] = case
+            self._save_cases()
+            self._finish_assignment(assignment, False, comment, now, case.stage)
+            snapshot = case.model_copy(deep=True)
+        outcome = SubmissionOutcome(
+            assignment=assignment,
+            case=snapshot,
+            pending_labels=workflow.labels_in(snapshot, workflow.PENDING),
+            message=(
+                "Subject rejected: it goes to the administrator with your comment, not to the editors. Nothing in "
+                "the dataset changed."
+            ),
+        )
+        self._record_submission(
+            outcome, user, f"Subject {key} rejected as a whole by '{user.name}'; it goes to the administrator.", comment
         )
         return outcome
 
@@ -1524,8 +1548,8 @@ class QCStore:
         key = assignment.subject_key
         if key in self._applying:
             raise QCError(
-                f"The administrator is approving {key} right now, so the verdict was not recorded. Ask for the "
-                "next subject.",
+                f"The administrator is approving or closing {key} right now, so the verdict was not recorded. Ask "
+                "for the next subject.",
                 status_code=409,
             )
         if assignment.state == "expired":
@@ -1846,24 +1870,63 @@ class QCStore:
         )
         return snapshot
 
-    def close_case(self, subject_key: str, comment: str | None = None) -> Case:
-        """Finish a subject's quality check without writing anything into the dataset. It is
-        not handed out again, unless it is sent back."""
+    def close_case(self, subject_key: str, comment: str | None = None, remark: str | None = None) -> Case:
+        """Finish a subject's quality check without writing its labels or segmentation into the
+        dataset. ``remark`` is added to the subject's remarks in Subject_info, as for an
+        approval: how a rejected subject is recorded. The ``comment`` is kept in its history,
+        the remark when there is none. It is not handed out again, unless it is sent back."""
         comment = (comment or "").strip() or None
+        remark = _check_remark(remark)
         with self._lock:
             case = self._admin_case(subject_key)
             if case.stage == workflow.CLOSED:
                 raise QCError(f"Subject {subject_key} is closed already.", status_code=409)
-            workflow.close(case, comment, utc_now_iso())
-            self._archive(case)
-            snapshot = case.model_copy(deep=True)
+            self._applying.add(subject_key)
+            dataset_id, subject_id = case.dataset_id, case.subject_id
+        try:
+            remark_added = False
+            if remark is not None:
+                with self._dataset_lock:
+                    remark_added = self._add_remark(dataset_id, subject_id, remark)
+            with self._lock:
+                case = self._cases[subject_key]
+                workflow.close(case, comment or remark, utc_now_iso(), remark=remark, remark_added=remark_added)
+                self._archive(case)
+                snapshot = case.model_copy(deep=True)
+        finally:
+            with self._lock:
+                self._applying.discard(subject_key)
+        if remark_added:
+            written = f"; '{remark}' added to its remarks, and nothing else written into the dataset."
+        elif remark:
+            written = f"; its remarks said '{remark}' already, and nothing was written into the dataset."
+        else:
+            written = "; nothing was written into the dataset."
         self.audit.record(
             "closed",
-            {"subject_key": subject_key, "comment": comment},
-            summary=f"Subject {subject_key} closed by the administrator; nothing was written into the dataset."
+            {"subject_key": subject_key, "comment": comment, "remark": remark, "remark_added": remark_added},
+            dataset_id=dataset_id if remark_added else None,
+            summary=f"Subject {subject_key} closed by the administrator{written}"
             + (f" Comment: {comment}" if comment else ""),
         )
         return snapshot
+
+    def _add_remark(self, dataset_id: int, subject_id: int, remark: str) -> bool:
+        """Caller holds the dataset lock. Add ``remark`` to the subject's remarks in Subject_info;
+        False when they say so already, and nothing is written."""
+        self._require_compatible_dataset(dataset_id)
+        added = False
+
+        def apply(subject: SubjectInfo) -> None:
+            nonlocal added
+            remarks = workflow.with_remark(subject.remarks, remark)
+            if remarks is not None:
+                subject.remarks = remarks
+                added = True
+
+        if workflow.with_remark(self.subject_info(dataset_id, subject_id).remarks, remark) is not None:
+            self._mutate_subject_info(dataset_id, subject_id, apply)
+        return added
 
     def _admin_case(self, subject_key: str) -> Case:
         """Caller holds the lock. A case the administrator may act on: not approved, not being
@@ -1874,7 +1937,7 @@ class QCStore:
         if case.stage == workflow.APPLIED:
             raise QCError(f"Subject {subject_key} is approved and in the dataset already.", status_code=409)
         if subject_key in self._applying:
-            raise QCError(f"Subject {subject_key} is being approved right now.", status_code=409)
+            raise QCError(f"Subject {subject_key} is being approved or closed right now.", status_code=409)
         self._expire_stale_assignments()
         holder = next(
             (a.user for a in self._assignments.values() if a.subject_key == subject_key and a.state == "assigned"),
@@ -1926,6 +1989,7 @@ class QCStore:
             to_edit=stages[workflow.EDIT],
             awaiting_approval=stages[workflow.APPROVAL],
             escalated=stages[workflow.ESCALATED],
+            rejected_subjects=stages[workflow.REJECTED_SUBJECT],
             applied=stages[workflow.APPLIED],
             closed=stages[workflow.CLOSED],
             datasets=dict(sorted(per_dataset.items())),
@@ -2032,7 +2096,7 @@ def _review_message(case: Case, details: dict) -> str:
         if details["missing"]:
             parts.append(f"{len(details['missing'])} reported missing")
         return (
-            f"Sent to the editors ({', '.join(parts) or 'the subject rejected'}). Nothing is written into the "
+            f"Sent to the editors ({', '.join(parts) or 'as the administrator asked'}). Nothing is written into the "
             "dataset before the administrator approves the subject."
         )
     if case.stage == workflow.APPROVAL:

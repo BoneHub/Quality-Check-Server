@@ -173,7 +173,7 @@ class ConfirmStoredRefusalTests(QCTestCase):
     def test_a_rejection_ignores_the_flag(self):
         store, alice, assignment = self.open()
         outcome = store.submit(assignment.assignment_id, alice, False, None, use_stored_segmentation=True)
-        self.assertEqual((outcome.assignment.state, outcome.stage), ("submitted", "edit"))
+        self.assertEqual((outcome.assignment.state, outcome.stage), ("submitted", "rejected"))
         self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1})
 
 
@@ -212,7 +212,7 @@ class DataAccessVerdictTests(QCTestCase):
     def test_but_can_reject_it(self):
         store, ian, assignment = self.open("image")
         outcome = store.submit(assignment.assignment_id, ian, False, None, comment="motion blur")
-        self.assertEqual(outcome.stage, "edit")
+        self.assertEqual(outcome.stage, "rejected")
 
     def test_an_editor_who_is_no_longer_sent_it_cannot_replace_it(self):
         """They would be overwriting labels they have never seen, and marking them absent."""

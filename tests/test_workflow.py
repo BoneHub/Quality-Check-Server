@@ -159,11 +159,28 @@ class ReviewVerdictTests(WorkflowTestCase):
         self.assertEqual(outcome.rejected_labels, ["FEMUR_RIGHT"])
         self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "rejected"})
 
-    def test_rejecting_the_subject_rejects_every_label_under_review(self):
+    def test_a_subject_rejected_as_a_whole_goes_to_the_administrator(self):
+        """No editor sees it: no correction of its segmentation would help."""
         assignment = self.store.next_subject(self.rita, REVIEWER)
-        outcome = self.store.submit(assignment.assignment_id, self.rita, False, None, comment="wrong patient")
-        self.assertEqual(outcome.stage, "edit")
-        self.assertEqual(outcome.rejected_labels, ["FEMUR_LEFT", "FEMUR_RIGHT"])
+        outcome = self.store.submit(
+            assignment.assignment_id, self.rita, False, None, comment="hip implant", rejected_labels=["FEMUR_RIGHT"]
+        )
+        self.assertEqual(outcome.stage, "rejected")
+        self.assertEqual((outcome.accepted_labels, outcome.rejected_labels), ([], []), "its labels are set aside")
+        self.assertEqual(self.states(), {"FEMUR_LEFT": "pending", "FEMUR_RIGHT": "pending"})
+        self.assertEqual(self.case().requests, [])
+        event = self.case().events[-1]
+        self.assertEqual((event.action, event.by, event.comment), ("reject", "rita", "hip implant"))
+        self.assertEqual(self.store.stats().rejected_subjects, 1)
+
+    def test_a_subject_rejected_after_a_correction_keeps_its_labels(self):
+        self.reject_right_femur()
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        assignment = self.store.next_subject(self.rita, REVIEWER)
+        self.store.submit(assignment.assignment_id, self.rita, False, None, comment="cropped at the knee")
+        self.assertEqual(self.case().stage, "rejected")
+        self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "pending"})
+        self.assertTrue(self.case().staged, "the correction waits, should the administrator send it back")
 
     def test_a_missing_bone_sends_the_subject_to_the_editors(self):
         outcome = self.review(self.store, self.rita, missing=["TIBIA_LEFT"], comment="the tibia is in the scan")

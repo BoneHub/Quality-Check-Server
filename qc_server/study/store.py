@@ -492,12 +492,16 @@ class StudyStore:
         accepted: list[str] | None,
         rejected: list[str] | None,
         comment: str | None,
+        subject_rejected: bool = False,
     ) -> ReadingResult:
-        """Record a reading: a verdict on every bone of the subject, accept or reject, and no other."""
+        """Record a reading: a verdict on every bone of the subject, accept or reject -- or the
+        subject rejected as a whole, which rejects every bone and sets the rest aside."""
         _require_reader(user)
-        if accepted is None:
-            raise QCError("Name the bones you accept in confirmed_labels, and those you reject in rejected_labels.")
         rejected = list(rejected or [])
+        if subject_rejected:
+            accepted, rejected = [], []
+        elif accepted is None:
+            raise QCError("Name the bones you accept in confirmed_labels, and those you reject in rejected_labels.")
         for name, given in (("accepted", accepted), ("rejected", rejected)):
             twice = sorted({bone for bone in given if given.count(bone) > 1})
             if twice:
@@ -508,6 +512,8 @@ class StudyStore:
             held = self.held_reading(assignment_id, user)
             subject_key, reading_number = rater.order[held.position - 1]
             bones = set(study.subject(subject_key).bones)
+            if subject_rejected:
+                rejected = sorted(bones)
             both = sorted(set(accepted) & set(rejected))
             unknown = sorted((set(accepted) | set(rejected)) - bones)
             unjudged = sorted(bones - set(accepted) - set(rejected))
@@ -527,6 +533,7 @@ class StudyStore:
                 handed_at=held.handed_at,
                 submitted_at=utc_now_iso(),
                 verdicts={bone: (REJECT if bone in rejected else ACCEPT) for bone in sorted(bones)},
+                subject_rejected=subject_rejected,
                 comment=comment,
             )
             self._append_reading(reading)
@@ -546,21 +553,28 @@ class StudyStore:
                 "reading": reading_number,
                 "accepted": len(bones) - len(rejected),
                 "rejected": len(rejected),
+                "subject_rejected": subject_rejected,
                 "comment": comment,
             },
             summary=(
                 f"Study reading {reading.position} of {total} by '{user.name}' ({subject_key}): "
-                f"{len(bones) - len(rejected)} accepted, {len(rejected)} rejected."
+                + (
+                    "the subject rejected."
+                    if subject_rejected
+                    else f"{len(bones) - len(rejected)} accepted, {len(rejected)} rejected."
+                )
             ),
         )
         return ReadingResult(
             assignment_id=assignment_id,
             accepted_labels=sorted(bones - set(rejected)),
             rejected_labels=sorted(rejected),
+            subject_rejected=subject_rejected,
             readings_done=done,
             readings_total=total,
             message=(
-                f"Reading {reading.position} of {total} recorded."
+                f"Reading {reading.position} of {total} recorded"
+                + (": the subject rejected." if subject_rejected else ".")
                 + (" That was your last one. Thank you." if done == total else "")
             ),
         )

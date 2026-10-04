@@ -4,15 +4,18 @@
 // extension does, shows them with NiiVue, and sends the verdict back: each label under review
 // accepted or rejected, and bones the segmentation lacks reported missing. It cannot edit a
 // segmentation: the verdict judges the segmentation as it is (use_stored_segmentation), and
-// what it rejects goes to an editor, in 3D Slicer, who corrects it or takes it out. Verdicts
-// wait on the server until its administrator approves the subject.
+// what it rejects goes to an editor, in 3D Slicer, who corrects it or takes it out. A subject no
+// correction would help -- a poor or cropped image, an implant -- is rejected as a whole, and
+// goes to the administrator instead. Verdicts wait on the server until its administrator
+// approves the subject.
 //
 // Every request says that it comes from a reviewer, so the server refuses the key of an
 // account that is not one.
 //
-// On a reliability study server (see qc_server.study) the same page shows study readings: each
-// blind, with no history and no lease, and judged bone by bone -- accept or reject, with no
-// missing bones and no rejection of the subject as a whole. The rater sees their own code.
+// On a reliability study server (see qc_server.study) the same page shows study readings, judged
+// as in the quality check but with no missing-bone reports. A reading is blind -- no history, no
+// earlier verdict, and the subject's id only if the study shows it -- and has no lease. The
+// rater sees their own code.
 //
 // Two NiiVue canvases. The 3D view shows each segment as a smooth surface, built here from its
 // voxels; the slice view shows the image with the labels over it.
@@ -1422,7 +1425,7 @@ function renderSubject() {
   }
   if (handout.data_access === "image") {
     notes.push(
-      "Your account is sent images only, so it cannot accept a segmentation. Reject the subject with a comment, report missing bones, or release it.",
+      "Your account is sent images only, so it cannot judge the segmentation. Report missing bones, reject the subject, or release it.",
     );
   } else if (handout.data_access === "segmentation") {
     notes.push("Your account is sent the segmentation only; the slices show the labels without the image.");
@@ -1453,7 +1456,8 @@ function isEditor() {
 
 function renderLease() {
   const handout = state.handout;
-  if (!handout || handout.study) return; // a study reading has no lease time
+  $("leaseBox").hidden = !(handout && handout.expires_at); // a study reading has no lease time
+  if ($("leaseBox").hidden) return;
   const expires = new Date(handout.expires_at);
   const minutes = Math.round((expires - Date.now()) / 60000);
   const relative =
@@ -1627,18 +1631,14 @@ function renderLabels() {
   const pending = [...state.labels.values()].filter((label) => label.state === "pending");
   const foot = [];
   if (pending.length) {
-    foot.push(
-      isStudy()
-        ? `Accept (✓) or reject (✗) each of the ${pending.length} bones, each on its own.`
-        : `${pending.length} label(s) under review: accept (✓) or reject (✗) each.`,
-    );
+    foot.push(`${pending.length} label(s) under review: accept (✓) or reject (✗) each.`);
   } else if (state.labels.size) {
     foot.push("No label is under review; reject one if you see a problem.");
   }
   if (!handout.has_segmentation && [...state.labels.values()].some((label) => label.painted)) {
     foot.push(
       handout.data_access === "image"
-        ? "Your account is not sent segmentations, so you can reject the subject, or report missing bones, but not accept."
+        ? "Your account is not sent segmentations, so you can report missing bones, or reject the subject, but not judge its labels."
         : "The segmentation could not be sent.",
     );
   }
@@ -1810,12 +1810,13 @@ function updateVerdictButtons() {
 
   const confirm = $("confirmBtn");
   if (isStudy()) {
-    confirm.textContent = "Submit";
+    // Nothing goes to an editor or to the administrator: the reading is only recorded.
+    confirm.textContent = "Submit verdict";
     confirm.title = !holding
       ? ""
       : open.length
-        ? `Give every bone a verdict first: ${open.join(", ")}.`
-        : "Record your verdicts for this reading.";
+        ? `Give every label under review a verdict first: ${open.join(", ")}.`
+        : "Record your verdict for this reading.";
   } else {
     confirm.textContent = toEditors
       ? `Send to editors (${toEditors})`
@@ -1851,10 +1852,6 @@ async function onSubmit() {
     return;
   }
   const { accepted, rejected, missing } = verdictToSend();
-  if (isStudy()) {
-    await submitReading(handout, accepted, rejected);
-    return;
-  }
   const toEditors = rejected.length + missing.length > 0;
   const leftOver = [...state.labels.values()].some(
     (label) => label.state === "pending" && !state.verdicts.has(label.name),
@@ -1866,29 +1863,34 @@ async function onSubmit() {
   }
   if (rejected.length) {
     body.push(
-      el("p", {}, "Rejected, for an editor to correct or take out:"),
+      el("p", {}, isStudy() ? "Rejected:" : "Rejected, for an editor to correct or take out:"),
       el("ul", {}, rejected.map((name) => el("li", {}, name))),
     );
   }
   if (missing.length) {
     body.push(el("p", {}, "Reported missing, for an editor to add:"), el("ul", {}, missing.map((name) => el("li", {}, name))));
   }
-  body.push(
-    el(
-      "p",
-      {},
-      toEditors
-        ? "The subject goes to the editors; the labels you accepted wait for their correction."
-        : leftOver
-          ? "The labels you could not judge wait for another reviewer."
-          : "The subject then waits for the administrator's approval.",
-    ),
-    el("p", { className: "muted" }, "Nothing is written into the dataset until the administrator approves the subject."),
-  );
+  if (isStudy()) {
+    body.push(studyNote());
+  } else {
+    body.push(
+      el(
+        "p",
+        {},
+        toEditors
+          ? "The subject goes to the editors; the labels you accepted wait for their correction."
+          : leftOver
+            ? "The labels you could not judge wait for another reviewer."
+            : "The subject then waits for the administrator's approval.",
+      ),
+      el("p", { className: "muted" }, "Nothing is written into the dataset until the administrator approves the subject."),
+    );
+  }
   if (state.sliceSpacing) {
     body.push(el("p", {}, `Your comment will note that you saw the scan at ${formatSpacing(1)}.`));
   }
-  if (!(await ask(`Submit your verdict on ${handout.subject_key}?`, body, toEditors ? "Send to editors" : "Submit"))) return;
+  const send = toEditors && !isStudy() ? "Send to editors" : "Submit";
+  if (!(await ask(`Submit your verdict on ${subjectName(handout)}?`, body, send))) return;
   const metadata = {
     quality_check_confirmed: true,
     use_stored_segmentation: true,
@@ -1900,36 +1902,21 @@ async function onSubmit() {
   await submitVerdict(metadata, "Submitting…");
 }
 
-// A study reading: every bone accepted or rejected, and nothing else.
-async function submitReading(handout, accepted, rejected) {
-  const body = [
-    el("p", {}, `${accepted.length} bone(s) `, el("strong", {}, "accepted"), `, ${rejected.length} `, el("strong", {}, "rejected"), "."),
-  ];
-  if (rejected.length) body.push(el("ul", {}, rejected.map((name) => el("li", {}, name))));
-  body.push(el("p", { className: "muted" }, "Your verdicts are recorded for the study, and cannot be changed afterwards."));
-  if (state.sliceSpacing) {
-    body.push(el("p", {}, `Your comment will note that you saw the scan at ${formatSpacing(1)}.`));
-  }
-  if (!(await ask(`Submit ${subjectName(handout)}?`, body, "Submit"))) return;
-  await submitVerdict(
-    {
-      quality_check_confirmed: true,
-      use_stored_segmentation: true,
-      confirmed_labels: accepted,
-      rejected_labels: rejected,
-      comment: commentToSend(),
-    },
-    "Submitting…",
-  );
+// Where a study reading's verdict goes: nowhere but the study's records.
+function studyNote() {
+  return el("p", { className: "muted" }, "Your verdict is recorded for the study, and cannot be changed afterwards. Nothing in the dataset changes.");
 }
 
+// The subject rejected as a whole, as no correction of its segmentation would help: it goes to
+// the administrator, who records why, and not to the editors.
 async function onReject() {
   const handout = state.handout;
+  const name = subjectName(handout);
   const comment = $("comment").value.trim();
   if (!comment) {
     const anyway = await ask(
-      `Reject ${handout.subject_key} without a comment?`,
-      [el("p", {}, "Saying what is wrong is what makes the rejection useful to whoever corrects it.")],
+      `Reject ${name} without a comment?`,
+      [el("p", {}, "Saying why, such as a poor or cropped image or an implant, is what makes the rejection useful.")],
       "Reject anyway",
       { danger: true, cancelLabel: "Write a comment" },
     );
@@ -1940,10 +1927,12 @@ async function onReject() {
     }
   } else if (
     !(await ask(
-      `Reject ${handout.subject_key}?`,
+      `Reject ${name}?`,
       [
-        el("p", {}, "Every label under review goes to the editors, with your comment."),
-        el("p", { className: "muted" }, "Nothing in the dataset changes."),
+        el("p", {}, "Reject the subject as a whole only when no correction of its segmentation would help. To have labels corrected, reject the labels instead."),
+        isStudy()
+          ? studyNote()
+          : el("p", { className: "muted" }, "It goes to the administrator with your comment, not to the editors. Nothing in the dataset changes."),
       ],
       "Reject",
       { danger: true },
@@ -1981,7 +1970,15 @@ async function onRelease() {
   const handout = state.handout;
   const sure = await ask(
     `Release ${subjectName(handout)}?`,
-    [el("p", {}, "It goes back to the queue without a verdict, and someone else can review it.")],
+    [
+      el(
+        "p",
+        {},
+        handout.study
+          ? "You give it back without a verdict. It stays your next reading: you get it again when you ask for the next subject."
+          : "It goes back to the queue without a verdict, and someone else can review it.",
+      ),
+    ],
     "Release",
   );
   if (!sure) return;

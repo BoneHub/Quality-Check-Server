@@ -156,12 +156,19 @@ class AfterAVerdictTests(QCTestCase):
         self.alice = self.store.create_user("alice")[0]
         self.bob = self.store.create_user("bob")[0]
 
-    def test_a_rejected_subject_goes_to_the_editors_not_to_another_reviewer(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
-        self.store.submit(assignment.assignment_id, self.alice, False, None)
+    def test_a_rejected_label_sends_the_subject_to_the_editors_not_to_another_reviewer(self):
+        outcome = self.review(self.store, self.alice, rejected=["FEMUR_LEFT"])
         with self.assertRaises(QCError):
             self.store.next_subject(self.bob, REVIEWER)
-        self.assertEqual(self.store.next_subject(self.bob, EDITOR).subject_key, assignment.subject_key)
+        self.assertEqual(self.store.next_subject(self.bob, EDITOR).subject_key, outcome.assignment.subject_key)
+
+    def test_a_rejected_subject_is_handed_to_nobody(self):
+        """It waits for the administrator: no correction would help."""
+        assignment = self.store.next_subject(self.alice, REVIEWER)
+        self.store.submit(assignment.assignment_id, self.alice, False, None, comment="hip implant")
+        for role in (REVIEWER, EDITOR):
+            with self.assertRaises(QCError):
+                self.store.next_subject(self.bob, role)
 
     def test_a_subject_waiting_for_approval_is_handed_to_nobody(self):
         self.review(self.store, self.alice)

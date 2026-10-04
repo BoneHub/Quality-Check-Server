@@ -11,6 +11,7 @@ A case is at one *stage*::
     edit       a reviewer rejected a label                     -> handed to editors
     approval   every label is accepted, kept or removed        -> waits for the administrator
     escalated  an editor could not correct it                  -> waits for the administrator
+    rejected   a reviewer rejected the subject as a whole      -> waits for the administrator
     applied    approved and written into the dataset           (finished)
     closed     closed by the administrator, nothing written    (finished, until reopened)
 
@@ -26,19 +27,24 @@ and each of its labels in one *state*, painted in the segmentation under review 
     kept       not under review -- the dataset has it as reviewed already -- and unchanged
 
 A reviewer's verdict accepts or rejects each label under review, and may reject any other
-too, or report a bone the segmentation lacks as missing. An editor's upload replaces the
-segmentation. A label whose voxels it changed, one it added, and one a reviewer had rejected
-are *edited*: they go back to ``pending`` -- or, when edits need no review, to ``accepted``
-if the editor vouches for them. A label the upload left alone keeps its state, so a
-correction that spills into an accepted neighbour takes the neighbour's acceptance away, and
-one that does not leaves it. A label the upload takes away is removed; when edits need
-review, a reviewer must agree first. A label nobody has reviewed stays ``pending`` until a
-reviewer has: an editor's word is not a review.
+too, or report a bone the segmentation lacks as missing. A rejected label needs a correction.
+A reviewer may instead reject the subject as a whole, when no correction of its segmentation
+would help -- the image is poor or cropped, or shows an implant: no editor sees it, its labels
+stay as they were, and the administrator decides what to record about it.
+
+An editor's upload replaces the segmentation. A label whose voxels it changed, one it added,
+and one a reviewer had rejected are *edited*: they go back to ``pending`` -- or, when edits
+need no review, to ``accepted`` if the editor vouches for them. A label the upload left alone
+keeps its state, so a correction that spills into an accepted neighbour takes the
+neighbour's acceptance away, and one that does not leaves it. A label the upload takes away
+is removed; when edits need review, a reviewer must agree first. A label nobody has reviewed
+stays ``pending`` until a reviewer has: an editor's word is not a review.
 
 The administrator may approve a case at any stage, not only once it waits for approval: the
 labels a reviewer accepted then become reviewed, and the labels nobody accepted keep the
 status the dataset gives them. An approval may add a remark to the subject's remarks in
-Subject_info, tagged ``QC: `` so that it can be told apart from the converters' remarks.
+Subject_info, tagged ``QC: `` so that it can be told apart from the converters' remarks, and so
+may closing a case, which writes nothing else -- how a rejected subject is recorded.
 
 Everything here works on the case alone; the store reads and writes the files.
 """
@@ -52,8 +58,11 @@ from .models import EDITOR, REVIEWER, Case, CaseEvent, CaseLabel, CaseRequest, F
 
 REVIEW, EDIT, APPROVAL, ESCALATED, APPLIED, CLOSED = "review", "edit", "approval", "escalated", "applied", "closed"
 
+#: The stage of a subject rejected as a whole. A label state shares the word (``REJECTED``).
+REJECTED_SUBJECT = "rejected"
+
 #: Stages in which a case is still in progress on this server.
-OPEN_STAGES: tuple[str, ...] = (REVIEW, EDIT, APPROVAL, ESCALATED)
+OPEN_STAGES: tuple[str, ...] = (REVIEW, EDIT, APPROVAL, ESCALATED, REJECTED_SUBJECT)
 
 #: Stages in which a case is finished; a closed one can be reopened.
 FINISHED_STAGES: tuple[str, ...] = (APPLIED, CLOSED)
@@ -148,15 +157,13 @@ def apply_review(
     comment: str | None,
     assignment_id: str | None,
     now: str,
-    request_edit: bool = False,
 ) -> dict:
     """A reviewer's verdict. The caller has checked the names against the case.
 
     An accepted label in the segmentation is accepted; accepting one that is not agrees to its
     removal. A rejected label goes to the editors, who correct it or take it out; a rejected
     one the segmentation lacks is a bone reported missing, which the case may not have known,
-    for them to add. ``request_edit`` sends the subject to the editors even when no label is
-    rejected: a rejection of the subject as a whole with nothing under review.
+    for them to add.
     """
     accepted = sorted(set(accepted))
     rejected = sorted(set(rejected))
@@ -174,8 +181,6 @@ def apply_review(
             edited_by=label.edited_by if label is not None else None,
         )
     case.labels = dict(sorted(case.labels.items()))
-    if request_edit and not rejected:
-        case.requests.append(CaseRequest(by=reviewer, role=REVIEWER, at=now, comment=comment or None))
     details = {
         "accepted": accepted,
         "rejected": [name for name in rejected if case.labels[name].painted],
@@ -183,6 +188,14 @@ def apply_review(
     }
     _step(case, reviewer, REVIEWER, "review", derived_stage(case), comment, assignment_id, now, details)
     return details
+
+
+def reject_subject(case: Case, reviewer: str, comment: str | None, assignment_id: str | None, now: str) -> dict:
+    """A reviewer rejected the subject as a whole: no correction of its segmentation would help.
+    Its labels stay as they were; the administrator decides what becomes of it, and what its
+    Subject_info says about it."""
+    _step(case, reviewer, REVIEWER, "reject", REJECTED_SUBJECT, comment, assignment_id, now, {})
+    return {}
 
 
 def apply_edit(
@@ -280,10 +293,14 @@ def return_to_edit(case: Case, comment: str | None, now: str, by: str = ADMIN) -
     return details
 
 
-def close(case: Case, comment: str | None, now: str, by: str = ADMIN) -> dict:
-    """Finish the case without writing anything into the dataset."""
-    _step(case, by, ADMIN, "close", CLOSED, comment, None, now, {})
-    return {}
+def close(
+    case: Case, comment: str | None, now: str, by: str = ADMIN, remark: str | None = None, remark_added: bool = False
+) -> dict:
+    """Finish the case without writing its labels or segmentation into the dataset: only the
+    ``remark`` asked for, added to the subject's remarks or found there already."""
+    details = {"remark": remark, "remark_added": remark_added} if remark else {}
+    _step(case, by, ADMIN, "close", CLOSED, comment, None, now, details)
+    return details
 
 
 def mark_applied(

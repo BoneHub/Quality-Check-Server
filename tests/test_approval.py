@@ -47,6 +47,16 @@ class ApprovalTestCase(QCTestCase):
     def statuses(self, subject_id: int = 1) -> dict:
         return self.builder.subject_info(1, subject_id)["segmentation"]
 
+    def remarks(self) -> str | None:
+        return self.builder.subject_info(1, 1).get("remarks")
+
+    def given_remarks(self, remarks: str) -> None:
+        """Remarks in Subject_info already, as a converter writes them."""
+        path = self.dataset_root / "Dataset_001" / "Subject_info_001.json"
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        entries[0]["remarks"] = remarks
+        path.write_text(json.dumps(entries, indent=4), encoding="utf-8")
+
     def correct_right_femur(self, store=None) -> None:
         """rita rejects the right femur, eddie corrects it, and rita accepts the correction."""
         store = store or self.store
@@ -246,16 +256,6 @@ class RemarkTextTests(unittest.TestCase):
 
 class RemarkTests(ApprovalTestCase):
     """A remark added to the subject's Subject_info as it is approved."""
-
-    def remarks(self) -> str | None:
-        return self.builder.subject_info(1, 1).get("remarks")
-
-    def given_remarks(self, remarks: str) -> None:
-        """Remarks in Subject_info already, as a converter writes them."""
-        path = self.dataset_root / "Dataset_001" / "Subject_info_001.json"
-        entries = json.loads(path.read_text(encoding="utf-8"))
-        entries[0]["remarks"] = remarks
-        path.write_text(json.dumps(entries, indent=4), encoding="utf-8")
 
     def test_the_remark_is_written_with_its_tag(self):
         self.review(self.store, self.rita, comment="hip implant")
@@ -581,6 +581,57 @@ class AdminActionTests(ApprovalTestCase):
         self.assertEqual(ctx.exception.status_code, 400)
 
 
+class RejectedSubjectTests(ApprovalTestCase):
+    """A subject a reviewer rejected as a whole: the administrator records why."""
+
+    def reject_subject(self, comment: str = "hip implant"):
+        assignment = self.store.next_subject(self.rita, REVIEWER)
+        return self.store.submit(assignment.assignment_id, self.rita, False, None, comment=comment)
+
+    def test_it_waits_for_the_administrator(self):
+        self.reject_subject()
+        self.assertEqual([case["subject_key"] for case in self.store.cases(stages=["rejected"])], [KEY])
+        self.assertEqual(self.store.stats().rejected_subjects, 1)
+        self.assertEqual(self.make_store().case_of(KEY).stage, "rejected", "and still does after a restart")
+
+    def test_closing_it_writes_the_remark_and_nothing_else(self):
+        self.reject_subject()
+        case = self.store.close_case(KEY, remark="Hip implant")
+        self.assertEqual(case.stage, "closed")
+        self.assertEqual(self.remarks(), "QC: Hip implant")
+        self.assertEqual(self.statuses(), {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.original)
+        step = case.events[-1]
+        self.assertEqual((step.action, step.comment), ("close", "QC: Hip implant"))
+        self.assertEqual(step.details, {"remark": "QC: Hip implant", "remark_added": True})
+        self.assertIn("'QC: Hip implant' added to its remarks", self.builder.dataset_log(1).read_text(encoding="utf-8"))
+        for user, role in ((self.rita, REVIEWER), (self.eddie, EDITOR)):
+            with self.assertRaises(QCError):
+                self.store.next_subject(user, role)
+
+    def test_a_remark_there_already_is_not_written_again(self):
+        self.given_remarks("Metal artifact present; QC: hip implant")
+        path = self.dataset_root / "Dataset_001" / "Subject_info_001.json"
+        before = path.read_bytes()
+        self.reject_subject()
+        case = self.store.close_case(KEY, remark="Hip implant")
+        self.assertFalse(case.events[-1].details["remark_added"])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_remark_too_long_is_refused_and_the_subject_still_waits(self):
+        self.reject_subject()
+        with self.assertRaises(QCError) as ctx:
+            self.store.close_case(KEY, remark="x" * 600)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(self.store.case_of(KEY).stage, "rejected")
+        self.assertIsNone(self.remarks())
+
+    def test_the_reviewer_can_be_overruled(self):
+        self.reject_subject()
+        self.assertEqual(self.store.return_case(KEY, "review", "the implant is in the other leg").stage, "review")
+        self.assertEqual(self.store.next_subject(self.rita, REVIEWER).subject_key, KEY)
+
+
 class AdminApiTests(ApiTestCase):
     """The approvals as the admin panel makes them."""
 
@@ -630,6 +681,21 @@ class AdminApiTests(ApiTestCase):
             .status_code,
             400,
         )
+
+    def test_a_rejected_subject_is_closed_with_a_remark_from_the_panel(self):
+        handout = self.next_subject(self.alice_key, REVIEWER)
+        rejected = self.submit(self.alice_key, handout["assignment_id"], False, role=REVIEWER, comment="cropped")
+        self.assertEqual(rejected.json()["stage"], "rejected")
+        listed = self.client.get("/admin/api/cases?stage=rejected", headers=self.admin_headers).json()
+        self.assertEqual([case["subject_key"] for case in listed], [KEY])
+        self.assertEqual(self.client.get("/admin/api/stats", headers=self.admin_headers).json()["rejected_subjects"], 1)
+        closed = self.client.post(
+            f"/admin/api/cases/{KEY}/close", json={"remark": "Cropped at the knee"}, headers=self.admin_headers
+        )
+        self.assertEqual(closed.status_code, 200, closed.text)
+        self.assertEqual(closed.json()["events"][-1]["details"]["remark_added"], True)
+        self.assertEqual(self.builder.subject_info(1, 1)["remarks"], "QC: Cropped at the knee")
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
 
     def test_the_segmentation_can_be_downloaded_to_look_at_first(self):
         self.accept(self.alice_key)

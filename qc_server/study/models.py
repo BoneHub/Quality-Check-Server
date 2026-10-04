@@ -15,7 +15,7 @@ StudyState = Literal["draft", "running", "ended"]
 #: How the study's subjects are chosen: a list the administrator types, or a random pick.
 SubjectMode = Literal["list", "random"]
 
-#: A rater's verdict on one bone.
+#: A rater's verdict on one bone. Rejecting the subject as a whole rejects each of its bones.
 Verdict = Literal["accept", "reject"]
 
 ACCEPT: Verdict = "accept"
@@ -175,7 +175,8 @@ class HeldReading(BaseModel):
 
 
 class Reading(BaseModel):
-    """A reading as it was submitted: a verdict on every bone of the subject."""
+    """A reading as it was submitted: a verdict on every bone of the subject. Rejecting the
+    subject as a whole rejects every bone."""
 
     assignment_id: str
     rater: str
@@ -186,6 +187,7 @@ class Reading(BaseModel):
     handed_at: str
     submitted_at: str
     verdicts: dict[str, Verdict]
+    subject_rejected: bool = Field(False, description="The subject was rejected as a whole")
     comment: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -240,6 +242,7 @@ class ReadingResult(BaseModel):
     assignment_id: str
     accepted_labels: list[str]
     rejected_labels: list[str]
+    subject_rejected: bool = False
     readings_done: int
     readings_total: int
     message: str

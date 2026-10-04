@@ -201,17 +201,17 @@ class RejectedSubmissionTests(QCTestCase):
 
     def test_a_reviewers_rejection_changes_nothing_in_the_dataset(self):
         outcome = self.reject(REVIEWER, comment="too noisy")
-        self.assertEqual(outcome.stage, "edit")
+        self.assertEqual(outcome.stage, "rejected")
         self.assertEqual(self.dataset_state(), self.before)
 
     def test_an_editors_rejection_changes_nothing_either(self):
-        self.reject(REVIEWER)
+        self.review(self.store, self.alice, rejected=["FEMUR_RIGHT"])
         outcome = self.reject(EDITOR, comment="cannot be corrected")
         self.assertEqual(outcome.stage, "escalated")
         self.assertEqual(self.dataset_state(), self.before)
 
     def test_an_uploaded_file_is_ignored_when_rejecting(self):
-        self.reject(REVIEWER)
+        self.review(self.store, self.alice, rejected=["FEMUR_RIGHT"])
         outcome = self.reject(EDITOR, upload=self.upload_file(["TIBIA_LEFT"]))
         self.assertFalse(outcome.segmentation_staged)
         self.assertEqual(list((self.state_dir / "staged").rglob("*.seg.nrrd")), [])

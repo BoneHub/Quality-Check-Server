@@ -1,6 +1,7 @@
 """A study's results: the numbers, the figures, the report, and the CSV files.
 
-* **Items** are the bones of the study's subjects, each judged accept or reject.
+* **Items** are the bones of the study's subjects, each judged accept or reject. A reading that
+  rejects the subject as a whole rejects each of its bones.
 * **Intra-rater**: each rater's readings of an item, compared with each other.
 * **Inter-rater**: the raters' first readings of an item, for each pair of raters and for all
   of them together. Later readings are the rater's second look, so they are left out here.
@@ -177,12 +178,17 @@ def results_zip(files: ReportFiles) -> bytes:
 
 # ----------------------------------------------------------------------- CSV
 def readings_csv(study: Study, readings: list[Reading]) -> str:
-    """One row per bone per reading, with the rater's code in place of their name."""
+    """One row per bone per reading, with the rater's code in place of their name.
+    ``subject_rejected`` marks a reading that rejected the subject as a whole, and so each of
+    its bones."""
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(
-        ["rater", "subject", "reading", "position", "bone", "verdict", "handed_out_at", "submitted_at", "comment"]
-    )
+        [
+            "rater", "subject", "reading", "position", "bone", "verdict", "subject_rejected",
+            "handed_out_at", "submitted_at", "comment",
+        ]
+    )  # fmt: skip
     bones_of = {subject.subject_key: subject.bones for subject in study.subjects}
     for reading in sorted(readings, key=lambda r: (_code_order(r.code), r.position)):
         for bone in bones_of.get(reading.subject_key, sorted(reading.verdicts)):
@@ -196,6 +202,7 @@ def readings_csv(study: Study, readings: list[Reading]) -> str:
                     reading.position,
                     bone,
                     reading.verdicts[bone],
+                    "true" if reading.subject_rejected else "false",
                     reading.handed_at,
                     reading.submitted_at,
                     reading.comment or "",
@@ -601,7 +608,8 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
 
 _METHOD = """
 <ul class="method">
-<li><b>Items.</b> Every bone of every study subject, judged <i>accept</i> or <i>reject</i> at each reading.</li>
+<li><b>Items.</b> Every bone of every study subject, judged <i>accept</i> or <i>reject</i> at each reading. A
+reading that rejects the subject as a whole rejects each of its bones.</li>
 <li><b>Intra-rater</b> compares one rater's readings of an item; <b>inter-rater</b> compares the raters'
 first readings of it, for each pair of raters and for all of them together.</li>
 <li><b>% agreement</b>: per item, the share of pairs of verdicts that agree, averaged over the items with two

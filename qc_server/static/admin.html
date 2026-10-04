@@ -284,7 +284,8 @@
       border-color: var(--ok);
     }
 
-    .pill.escalated {
+    .pill.escalated,
+    .pill.rejected {
       color: var(--warn);
       border-color: var(--warn);
     }
@@ -604,7 +605,9 @@
           Reviewers' and editors' verdicts wait here. Nothing is written into the dataset until you approve a
           subject: its accepted labels then become reviewed (status 2) in <code>Subject_info</code>, and an editor's
           correction replaces the dataset's segmentation, which is backed up first. Tick subjects to approve several
-          at once, with a remark for their <code>Subject_info</code> if you like.
+          at once, with a remark for their <code>Subject_info</code> if you like. A subject a reviewer rejected as a
+          whole — a poor or cropped image, an implant — waits here too: close it with a remark saying why, which is all
+          that is written into its <code>Subject_info</code>.
         </p>
         <div class="row" style="margin-bottom:12px">
           <div style="flex:0 0 auto">
@@ -612,6 +615,7 @@
             <select id="stageFilter">
               <option value="approval">waiting for approval</option>
               <option value="escalated">sent to you by an editor</option>
+              <option value="rejected">rejected subjects</option>
               <option value="review">waiting for a reviewer</option>
               <option value="edit">waiting for an editor</option>
               <option value="applied">approved</option>
@@ -850,6 +854,7 @@
         edit: "to edit",
         approval: "awaiting approval",
         escalated: "escalated",
+        rejected: "rejected",
         applied: "approved",
         closed: "closed"
       };
@@ -956,6 +961,7 @@
         var cells = [
           ["Awaiting approval", stats.awaiting_approval, stats.awaiting_approval > 0],
           ["Escalated", stats.escalated, stats.escalated > 0],
+          ["Rejected subjects", stats.rejected_subjects, stats.rejected_subjects > 0],
           ["To review", stats.to_review],
           ["To edit", stats.to_edit],
           ["Out now", stats.assigned],
@@ -1023,7 +1029,8 @@
       // A step of a subject's history, in words: "rita reviewed".
       function stepText(e) {
         var what = {
-          review: "reviewed", edit: "corrected", escalate: "sent it to you", approve: "approved",
+          review: "reviewed", reject: "rejected the subject", edit: "corrected", escalate: "sent it to you",
+          approve: "approved",
           "return": "sent it back", close: "closed"
         }[e.action] || e.action;
         return e.by + " " + what;
@@ -1047,8 +1054,12 @@
         }
         buttons.push('<button class="small" data-act="to-review" data-key="' + key + '" title="Every verdict is reviewed again">To reviewers</button>');
         buttons.push('<button class="small" data-act="to-edit" data-key="' + key + '" title="An editor corrects it, with your comment">To editors</button>');
-        if (c.stage !== "closed") {
-          buttons.push('<button class="small danger" data-act="close" data-key="' + key + '" title="Finish it without writing anything">Close</button>');
+        if (c.stage === "rejected") {
+          buttons.push('<button class="small primary" data-act="close" data-key="' + key + '" title="Finish it, with a ' +
+            'remark for its Subject_info saying why it was rejected. Nothing else is written.">Close…</button>');
+        } else if (c.stage !== "closed") {
+          buttons.push('<button class="small danger" data-act="close" data-key="' + key + '" title="Finish it without ' +
+            'writing its labels or segmentation; a remark for its Subject_info if you like">Close</button>');
         }
         return '<div class="actions">' + buttons.join("") + "</div>";
       }
@@ -1203,11 +1214,11 @@
           var removed = (a.removed_labels || []).length;
           return "corrected " + edited + (removed ? ", removed " + removed : "");
         }
+        if (!a.quality_check_confirmed) { return "rejected the subject"; }
         var accepted = (a.accepted_labels || []).length;
         var missing = (a.missing_labels || []).length;
         var rejected = (a.rejected_labels || []).length;
-        return (a.quality_check_confirmed ? "" : "rejected the subject: ") + "accepted " + accepted + ", rejected " + rejected +
-          (missing ? ", missing " + missing : "");
+        return "accepted " + accepted + ", rejected " + rejected + (missing ? ", missing " + missing : "");
       }
 
       function renderAssignments(rows) {
@@ -1247,6 +1258,7 @@
             if ((e.edited_labels || []).length) { parts.push("corrected " + names(e.edited_labels)); }
             if ((e.removed_labels || []).length) { parts.push("removed " + names(e.removed_labels)); }
             if (e.role === "editor" && !e.quality_check_confirmed) { parts.push("could not correct it"); }
+            if (e.role === "reviewer" && !e.quality_check_confirmed) { parts.push("rejected the subject"); }
             detail = (e.role ? e.role + ": " : "") + (parts.join("; ") || "no label judged") +
               " → " + (STAGE_TEXT[e.stage] || e.stage);
             if (e.comment) { detail += " — " + e.comment; }
@@ -1257,14 +1269,16 @@
           } else if (e.kind === "returned") {
             detail = "sent back to the " + (e.to === "edit" ? "editors" : "reviewers") + (e.comment ? " — " + e.comment : "");
           } else if (e.kind === "closed") {
-            detail = "closed" + (e.comment ? " — " + e.comment : "");
+            detail = "closed" + (e.remark ? (e.remark_added ? "; remark added: " : "; remark there already: ") + e.remark : "") +
+              (e.comment ? " — " + e.comment : "");
           } else if (e.kind === "assigned") {
             detail = (e.role ? "as " + e.role + ", " : "") + "lease until " + shortTime(e.expires_at);
           } else if (e.kind === "user_created" || e.kind === "user_updated") {
             detail = [(e.roles || []).join(" + "), e.key_prefix ? e.key_prefix + "…" : ""].filter(Boolean).join(" · ");
           } else if (e.kind === "study_reading") {
-            detail = "rater " + e.code + ", reading " + e.position + ": " + e.accepted + " accepted, " + e.rejected +
-              " rejected" + (e.comment ? " — " + e.comment : "");
+            detail = "rater " + e.code + ", reading " + e.position + ": " + (e.subject_rejected ? "subject rejected"
+              : e.accepted + " accepted, " + e.rejected + " rejected") +
+              (e.comment ? " — " + e.comment : "");
           } else if (e.kind === "study_handed_out") {
             detail = "rater " + e.code + ", reading " + e.position + " handed out";
           } else if (e.kind === "study_released") {
@@ -1452,10 +1466,17 @@
           if (comment === null) { return; }
           request = api("POST", path + "/return", { to: to, comment: comment });
         } else if (act === "close") {
-          var reason = window.prompt("Close " + key + " without writing anything into the dataset? It is not handed out " +
-            "again unless you send it back. Comment (optional):", "");
-          if (reason === null) { return; }
-          request = api("POST", path + "/close", { comment: reason });
+          // A rejected subject's remark starts from the reviewer's reason.
+          var rejection = (listedCases[key].events || []).filter(function (e) { return e.action === "reject"; }).pop();
+          var remark = window.prompt("Close " + key + "? Its labels and segmentation are not written into the dataset, " +
+            "and it is not handed out again unless you send it back.\n\nRemark to add to its Subject_info, as " +
+            "“QC: …” (optional):", listedCases[key].stage === "rejected" && rejection ? rejection.comment || "" : "");
+          if (remark === null) { return; }
+          request = api("POST", path + "/close", { remark: remark }).then(function (c) {
+            var closing = c.events[c.events.length - 1].details;
+            showOk(key + " closed" + (closing.remark_added ? "; “" + closing.remark + "” added to its Subject_info."
+              : closing.remark ? "; its Subject_info said “" + closing.remark + "” already." : "."));
+          });
         }
         if (request) {
           button.disabled = true;

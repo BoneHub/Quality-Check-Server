@@ -169,7 +169,7 @@ class AdminMonitoringTests(ApiTestCase):
         everything = self.client.get("/admin/api/assignments", headers=self.admin_headers).json()
         self.assertEqual(len(everything), 2)
         submitted = self.client.get("/admin/api/assignments?state=submitted", headers=self.admin_headers).json()
-        self.assertEqual([(a["user"], a["role"], a["stage_after"]) for a in submitted], [("alice", "reviewer", "edit")])
+        self.assertEqual([(a["user"], a["role"], a["stage_after"]) for a in submitted], [("alice", "reviewer", "rejected")])
 
     def test_an_administrator_can_take_a_subject_back_from_a_reviewer(self):
         handout = self.next_subject(self.alice_key)

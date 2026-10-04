@@ -36,8 +36,8 @@ DATA_ACCESS_DESCRIPTIONS: dict[str, str] = {
     "image": "the image only",
 }
 
-#: Where a subject stands in the quality check; see ``workflow``. The first four are open.
-CaseStage = Literal["review", "edit", "approval", "escalated", "applied", "closed"]
+#: Where a subject stands in the quality check; see ``workflow``. The first five are open.
+CaseStage = Literal["review", "edit", "approval", "escalated", "rejected", "applied", "closed"]
 
 #: What has become of one label of a subject; see ``workflow``.
 LabelState = Literal["pending", "accepted", "rejected", "removed", "kept"]
@@ -153,11 +153,10 @@ class CaseLabel(BaseModel):
 
 
 class CaseRequest(BaseModel):
-    """Something an editor must see to that is no single label: a reviewer's rejection of the
-    subject as a whole when nothing in it was under review, or the administrator's word."""
+    """Something an editor must see to that is no single label: the administrator's word."""
 
     by: str
-    role: str = Field(..., description="'reviewer', or 'admin'")
+    role: str = Field(..., description="'admin'; 'reviewer' in cases recorded by an earlier version")
     at: str
     comment: str | None = None
 
@@ -170,7 +169,9 @@ class CaseEvent(BaseModel):
     at: str
     by: str
     role: str = Field(..., description="'reviewer', 'editor' or 'admin'")
-    action: str = Field(..., description="'review', 'edit', 'escalate', 'approve', 'return' or 'close'")
+    action: str = Field(
+        ..., description="'review', 'reject' (the subject as a whole), 'edit', 'escalate', 'approve', 'return' or 'close'"
+    )
     stage: CaseStage = Field(..., description="Where the subject went")
     comment: str | None = None
     assignment_id: str | None = None
@@ -302,9 +303,9 @@ class SubmissionRequest(BaseModel):
 
     A reviewer judges the segmentation as it is (``use_stored_segmentation``): each label is
     accepted or rejected, and bones it lacks are reported missing. An editor uploads the
-    corrected segmentation. ``quality_check_confirmed=false`` rejects the subject as a whole:
-    from a reviewer, every label under review goes to the editors; from an editor, the
-    subject goes to the administrator.
+    corrected segmentation. ``quality_check_confirmed=false`` rejects the subject as a whole,
+    and sends it to the administrator: from a reviewer, as no correction of its segmentation
+    would help, so no editor sees it; from an editor, as it could not be corrected.
     """
 
     quality_check_confirmed: bool = Field(
@@ -372,6 +373,7 @@ class QueueStats(BaseModel):
     to_edit: int = Field(0, description="In progress, waiting for an editor")
     awaiting_approval: int = Field(0, description="Every label accepted, waiting for the administrator")
     escalated: int = Field(0, description="An editor sent it to the administrator")
+    rejected_subjects: int = Field(0, description="A reviewer rejected it as a whole, for the administrator to record")
     applied: int = Field(0, description="Approved and written into the dataset")
     closed: int = Field(0, description="Closed by the administrator without writing anything")
     datasets: dict[int, int] = Field(default_factory=dict, description="dataset id -> eligible subject count")

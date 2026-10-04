@@ -292,8 +292,8 @@ class ReviewOverHttpTests(ApiTestCase):
         self.assertEqual(response.status_code, 200, response.text)
 
         body = response.json()
-        self.assertEqual((body["state"], body["stage"]), ("submitted", "edit"))
-        self.assertEqual(body["rejected_labels"], ["FEMUR_LEFT", "FEMUR_RIGHT"])
+        self.assertEqual((body["state"], body["stage"]), ("submitted", "rejected"))
+        self.assertEqual(body["rejected_labels"], [], "no label goes to the editors")
         self.assertEqual(self.builder.all_subject_info(1), before)
         self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), before_bytes)
 

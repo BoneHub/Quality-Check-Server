@@ -128,7 +128,7 @@ class ClientHappyPathTests(LiveServerTestCase):
         before = self.builder.all_subject_info(1)
         handout = self.reviewer.next_subject()
         result = self.reviewer.submit(handout["assignment_id"], quality_check_confirmed=False, comment="too noisy")
-        self.assertEqual((result["state"], result["stage"]), ("submitted", "edit"))
+        self.assertEqual((result["state"], result["stage"]), ("submitted", "rejected"))
         self.assertEqual(self.builder.all_subject_info(1), before)
 
     def test_named_labels_can_be_judged_one_at_a_time(self):

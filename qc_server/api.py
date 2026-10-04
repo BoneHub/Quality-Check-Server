@@ -203,8 +203,9 @@ def submit(
     A reviewer sends ``use_stored_segmentation`` and no file, with each label under review
     accepted (``confirmed_labels``) or rejected (``rejected_labels``), and bones the
     segmentation lacks in ``missing_labels``. An editor uploads the corrected segmentation.
-    ``quality_check_confirmed=false`` rejects the subject: from a reviewer, every label under
-    review goes to the editors; from an editor, the subject goes to the administrator.
+    ``quality_check_confirmed=false`` rejects the subject as a whole, and it goes to the
+    administrator: from a reviewer, as no correction of its segmentation would help; from an
+    editor, as beyond correction.
 
     The verdict is kept in the server's state folder. Nothing in the dataset changes until the
     administrator approves the subject.

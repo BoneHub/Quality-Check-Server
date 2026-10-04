@@ -62,6 +62,8 @@ own correction.
       │                                   │
       ├── a label rejected or missing ──► EDIT ── editor cannot fix it ──► ESCALATED
       │                                   │                                (you decide)
+      ├── subject rejected ──► REJECTED   │
+      │   (you record why)                │
       │ every label accepted              │ correction accepted on the editor's word
       ▼                                   │ (only when corrections need no review)
    APPROVAL ◄─────────────────────────────┘
@@ -80,8 +82,15 @@ own correction.
    `Subject_info_XXX.json` and replace the dataset's segmentation with the correction. See
    [What approval writes](#what-approval-writes).
 
-An editor who cannot fix a subject (the image is unusable, for example) sends it to you with
-a comment. It then shows as *escalated*.
+An editor who cannot fix a subject sends it to you with a comment. It then shows as
+*escalated*.
+
+A reviewer who finds that **no correction of the segmentation would help** (a poor or cropped
+image, or an implant, for example) presses **Reject subject**, with a comment saying why. The
+subject goes to you, not to the editors, with its labels as they were, and shows as
+*rejected*. You record why in its `Subject_info`: see
+[Deal with a rejected subject](#everyday-tasks). Rejecting labels is for segmentations that need
+a correction.
 
 ### Which subjects are handed out
 
@@ -194,12 +203,13 @@ A count of subjects at each point of the quality check:
 | --- | --- |
 | Awaiting approval | have every label accepted and wait for you. Highlighted when above 0 |
 | Escalated | an editor could not fix and sent to you. Highlighted when above 0 |
+| Rejected subjects | a reviewer rejected as a whole, for you to record why. Highlighted when above 0 |
 | To review | are in progress and wait for a reviewer |
 | To edit | are in progress and wait for an editor |
 | Out now | someone is working on right now |
 | Not started | are eligible and nobody has looked at yet |
 | Approved | you approved; they are written into the dataset |
-| Closed | you closed without writing anything |
+| Closed | you closed without writing their labels or segmentation |
 | On other servers | another server that uses this dataset has out or in progress |
 | Eligible | match the queue policy |
 | Subjects total | are in the dataset |
@@ -215,6 +225,7 @@ This is where you decide. The **Showing** menu picks what to list:
 | --- | --- |
 | waiting for approval (default) | are ready for you to approve |
 | sent to you by an editor | are escalated |
+| rejected subjects | a reviewer rejected as a whole |
 | waiting for a reviewer | are in progress, at a reviewer |
 | waiting for an editor | are in progress, at an editor |
 | approved | are finished and written into the dataset |
@@ -247,7 +258,7 @@ The buttons:
 | **Approve ticked…** | Approves the subjects you ticked, after asking for an optional remark to add to their `Subject_info` (see [Remarks](#remarks)). Lists any it could not approve, with the reason |
 | **To reviewers** | Sends the subject back to the reviewers: every verdict is reviewed again. You can add a comment |
 | **To editors** | Sends the subject to an editor with your comment, for example what to fix |
-| **Close** | Ends the quality check of this subject without writing anything. It is not handed out again unless you press To reviewers or To editors, which reopen it |
+| **Close** | Ends the quality check of this subject without writing its labels or segmentation. It asks for an optional remark to add to its `Subject_info` (see [Remarks](#remarks)), filled in with the reviewer's comment for a rejected subject, where the button reads **Close…**. It is not handed out again unless you press To reviewers or To editors, which reopen it |
 
 The box in the header row ticks every subject listed. **Approve ticked…** approves only what you
 ticked, never more, and each subject only as it was listed: one that changed since, because
@@ -323,8 +334,8 @@ in the header ticks them all) and press **Approve ticked…**.
 
 **Record a finding, such as an implant, in `Subject_info`.** Ask the reviewers to judge each
 bone as usual, and to write the finding in their comment, always in the same words, for
-example "hip implant". Do not have them reject the subject for it: that sends it to the
-editors, who have nothing to correct. Then, before you approve anything else:
+example "hip implant". They reject the subject only when the finding means no correction would
+help (see below); otherwise its bones are still worth reviewing. Then, before you approve anything else:
 
 1. Under **Approvals**, show *waiting for approval* and type `hip implant` in **Comments
    containing**.
@@ -337,12 +348,22 @@ and an approved subject cannot be given one afterwards, except by editing `Subje
 hand. Show *all* to find subjects with the finding at other stages, for example one a
 reviewer rejected for it before you gave these instructions.
 
+**Deal with a rejected subject.** Show *rejected subjects* and read the reviewer's reason
+under **Latest**. Then:
+
+- **Close…**, which asks for a remark, filled in with the reviewer's comment. Edit it into the
+  words you use for that finding, for example `Hip implant`, and it is added to the subject's
+  `remarks` in `Subject_info` as `QC: Hip implant` (see [Remarks](#remarks)). Nothing else is
+  written: the label statuses and the segmentation stay as they are;
+- **To reviewers**, if you disagree with the reviewer: every label is judged again.
+
 **Deal with an escalated subject.** Show *sent to you by an editor* and read the editor's
 comment under **Latest**. Then:
 
 - **To editors**, with a comment saying what to do, if it can be fixed after all;
 - **To reviewers**, if the verdicts should be looked at again;
-- **Close**, if the subject cannot be used. Nothing is written into the dataset.
+- **Close**, if the subject cannot be used, with a remark for its `Subject_info` if you like.
+  Nothing else is written into the dataset.
 
 **Send back a subject that does not look right.** Before approving, press **To reviewers** (to
 have every label judged again) or **To editors** (with a comment saying what to fix).
@@ -464,7 +485,7 @@ Set under **Sent to the user** when you create them, and changeable in the **Use
 | --- | --- | --- |
 | Image + segmentation (default) | both | most users |
 | Segmentation only | the segmentation | reviewers who judge the shape of the bones without the image. They are not handed subjects without a segmentation |
-| Image only | the image | editors who segment from scratch. As reviewers, they can only reject the subject or report missing bones, not accept a label they have not seen |
+| Image only | the image | editors who segment from scratch. As reviewers, they can only report missing bones or reject the subject, not judge a label they have not seen |
 
 A file a user is not sent cannot be downloaded by them either.
 
@@ -530,8 +551,9 @@ change at once.
 | to edit | a reviewer rejected a label or reported one missing, or you sent it to the editors | editors |
 | awaiting approval | every label is accepted, or not under review | nobody: waits for you |
 | escalated | an editor could not fix it | nobody: waits for you |
+| rejected | a reviewer rejected the subject as a whole: no correction would help | nobody: waits for you |
 | approved | written into the dataset | nobody, ever again |
-| closed | you ended it without writing anything | nobody, unless you send it back |
+| closed | you ended it without writing its labels or segmentation, only a remark if you gave one | nobody, unless you send it back |
 
 ### Label states
 
@@ -579,7 +601,7 @@ that no reviewer accepted.
 
 ### Remarks
 
-A remark you give when approving is added to the end of the subject's `remarks` in
+A remark you give when approving or closing a subject is added to the end of its `remarks` in
 `Subject_info`, tagged `QC:` so that it can be told apart from the remarks the converters
 wrote:
 
@@ -597,6 +619,7 @@ wrote:
 - The remark is written in the same write as the label statuses, so an approval that fails
   writes neither. It is kept with the subject's history, where **Comments containing** finds it
   too.
+- Closing a subject writes the remark and nothing else: how a rejected subject is recorded.
 - Nothing undoes a remark. Correct a wrong one by hand in `Subject_info_XXX.json`.
 - People will find subjects by searching `remarks` as text, so use the same words for the same
   finding every time.
@@ -843,8 +866,10 @@ segmentations. A reviewer:
    anything else worth knowing, such as an implant: you can find subjects by what their
    comments say;
 5. presses **Accept** (or **Send to editors**, when something is rejected or missing),
-   **Reject subject** (rejects every label under review), or **Release** (hands it back; the
-   reviewer is offered it again only once nothing else is waiting for them).
+   **Reject subject** (no correction of the segmentation would help, such as for a poor or
+   cropped image or an implant: it goes to you, not to the editors, with the comment saying
+   why), or **Release** (hands it back; the reviewer is offered it again only once nothing else
+   is waiting for them).
 
 Labels the reviewer did not judge wait for another reviewer. A segmentation that is not on
 its image's voxel grid cannot be accepted: its labels can only be rejected, so that an editor
@@ -957,11 +982,15 @@ The readings in between are of the study's other subjects. There are no dummy su
 - **Every reading is blind**: no history and no other verdict. Nothing from `Subject_info` is
   shown, not even which bones it lists as reviewed. The subject id is shown only if the study
   shows it.
-- **Every bone gets one verdict**, accept or reject. There is no missing-bone report and no
-  **Reject subject**. The comment is optional; it goes into `readings.csv`, not into the numbers.
+- **A reading is judged as in the quality check**, on the same page with the same buttons,
+  except that there is no missing-bone report: every bone accepted or rejected, or **Reject
+  subject**. What the page says of where a verdict goes differs too, since nothing goes
+  anywhere. Rejecting the subject counts as a reject of each of its bones. The comment goes into
+  `readings.csv`, not into the numbers.
 - A rater holds one reading at a time, the next in their list. Several raters can read the same
-  subject at the same time. A reading has no lease time and cannot be skipped, so there is no
-  **Release**: a rater who leaves finds the same reading waiting when they come back.
+  subject at the same time. A reading has no lease time and cannot be skipped: **Release** hands
+  it back, and it is still the rater's next reading. A rater who leaves finds the same reading
+  waiting when they come back.
 - The panel's **Progress** shows each rater's code, name and readings done. **Recent activity**
   lists each reading.
 - **End study…** stops handing out readings. A reading open at that moment is not recorded.
@@ -978,10 +1007,11 @@ provisional.
 | `figures/figure1_intra_rater.svg`, `.png` | Intra-rater reliability per rater: % agreement, α and AC1, with 95% intervals |
 | `figures/figure2_inter_rater_pairs.svg`, `.png` | α of each pair of raters, with their % agreement. Three raters or more |
 | `figures/figure3_inter_rater_group.svg`, `.png` | Inter-rater reliability of each pair and of all raters together, with 95% intervals |
-| `readings.csv` | One row per bone per reading: rater code, subject, reading number, position in the rater's list, bone, verdict, times and comment |
+| `readings.csv` | One row per bone per reading: rater code, subject, reading number, position in the rater's list, bone, verdict, whether the reading rejected the subject as a whole (`subject_rejected`), times and comment |
 | `results.csv` | Every number of the report, with its interval |
 
-**The measures.** An *item* is a bone of a study subject. Intra-rater reliability compares a
+**The measures.** An *item* is a bone of a study subject, accepted or rejected. A reading that
+rejects the subject as a whole rejects each of its bones. Intra-rater reliability compares a
 rater's readings of an item; inter-rater reliability compares the raters' first readings of it.
 
 - **% agreement**: per item, the share of pairs of verdicts that agree, averaged over the items
@@ -1043,7 +1073,7 @@ segmentation paints it while `Subject_info` lists it as not available, or not at
 | `/docs` | Interactive OpenAPI documentation |
 | `/health` | Unauthenticated liveness probe |
 | `/api/v1/...` | Client API, authenticated with `X-API-Key`, in the role named by `X-Client-Role` |
-| `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals. `cases?comment=` finds subjects by their comments, and `POST cases/approve` takes `subject_keys`, a `remark`, `allow_unaccepted` and the `revisions` the subjects were listed at |
+| `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals. `cases?comment=` finds subjects by their comments, and `POST cases/approve` takes `subject_keys`, a `remark`, `allow_unaccepted` and the `revisions` the subjects were listed at. `POST cases/{key}/close` takes a `remark` too |
 | `/static/...` | The pages' scripts and the vendored NiiVue viewer |
 
 A [study server](#reliability-study) answers the review page at the same `/api/v1` paths, with
@@ -1071,7 +1101,8 @@ same sequence:
    - a reviewer: `quality_check_confirmed: true`, `use_stored_segmentation: true`,
      `confirmed_labels` (accepted), `rejected_labels` (rejected, of the labels in the
      segmentation), `missing_labels` (bones the segmentation lacks), `comment`. No file.
-     `quality_check_confirmed: false` rejects every label under review;
+     `quality_check_confirmed: false` rejects the subject as a whole: it goes to the
+     administrator, and its labels stay as they were;
    - an editor: `quality_check_confirmed: true`, the corrected `.seg.nrrd` as the
      `segmentation` part, `confirmed_labels` (vouched for; omitted, every label in the upload
      counts as vouched for), `comment`. `quality_check_confirmed: false` sends the subject to
@@ -1152,7 +1183,7 @@ To run one module or one test, replace the last command, for example with
 | Module | What it covers |
 | --- | --- |
 | `test_workflow.py` | The stages: reviewers first, per-label verdicts and missing bones, editors' corrections compared voxel by voxel, removals, review after correction or not, nobody reviewing their own correction, leases per role, late verdicts |
-| `test_approval.py` | What approving writes into the dataset, and nothing before it; remarks; approving a subject that does not wait for approval; refusals, backups and the undoing of a failed write; approving several at once; finding subjects by their comments; sending back and closing; the admin API for it |
+| `test_approval.py` | What approving writes into the dataset, and nothing before it; remarks; approving a subject that does not wait for approval; refusals, backups and the undoing of a failed write; approving several at once; finding subjects by their comments; sending back and closing; rejected subjects closed with a remark; the admin API for it |
 | `test_submission.py` | What an editor's upload is held to: the `.seg.nrrd` format, its canonical form, validation; rejections changing nothing; uploads of some bones only; the audit trail |
 | `test_confirm_as_is.py` | Judging the stored segmentation as it is, the geometry check on it, and who may accept or replace a segmentation |
 | `test_config.py` | The policy file and its `BONEHUB_QC_*` overrides |
@@ -1169,7 +1200,7 @@ To run one module or one test, replace the last command, for example with
 | `test_cli.py` | `bonehub-qc-server` commands |
 | `test_concurrency.py` | Several users hitting the server at once, and other users answered while one submission is checked or an approval is written |
 | `test_deployment.py` | Start-up from environment variables only, the credentials volume, the shipped docker files, and — where the docker CLI is at hand — what Compose makes of a local dataset folder or a share |
-| `test_study.py` | A reliability study server over HTTP: setting up and checking subjects and raters, blind readings, one verdict per bone, ending and deleting, the dataset and the quality check left alone, and results that name no rater |
+| `test_study.py` | A reliability study server over HTTP: setting up and checking subjects and raters, blind readings, verdicts as in the quality check, ending and deleting, the dataset and the quality check left alone, and results that name no rater |
 | `test_study_schedule.py` | What a study's seed draws: the subjects picked, the raters' codes, and each rater's list with its gap |
 | `test_study_reliability.py` | % agreement, Krippendorff's α and Gwet's AC1 against their published worked examples, and their bootstrap intervals |
 

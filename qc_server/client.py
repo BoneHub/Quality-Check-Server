@@ -115,7 +115,8 @@ class BoneHubQCClient:
         An editor's confirmed submission carries the corrected segmentation. A reviewer's
         judges the segmentation as it is (``use_stored_segmentation``), with labels accepted
         (``confirmed_labels``), rejected (``rejected_labels``; an editor corrects each one or
-        takes it out) and reported missing (``missing_labels``). A rejection needs no file.
+        takes it out) and reported missing (``missing_labels``). ``quality_check_confirmed=False``
+        rejects the subject as a whole, and needs no file.
         """
         if quality_check_confirmed and segmentation_path is None and not use_stored_segmentation:
             raise QCClientError(

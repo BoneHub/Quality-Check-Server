@@ -24,6 +24,7 @@ from qc_server.config import ENV_PREFIX
 from qc_server.models import EDITOR, REVIEWER, SubmissionRequest
 from qc_server.review import STATIC_DIR
 from qc_server.study.app import create_study_app
+from qc_server.study.report import readings_csv
 from qc_server.study.store import StudyStore
 
 from tests.support import QCTestCase, write_mask
@@ -450,8 +451,26 @@ class VerdictTests(StudyTestCase):
     def test_missing_bones_are_not_part_of_the_study(self):
         self.assert_refused(self.submit("alice", self.reading, missing_labels=["SACRUM"]), "no reports of missing bones")
 
-    def test_the_subject_cannot_be_rejected_as_a_whole(self):
-        self.assert_refused(self.submit("alice", self.reading, quality_check_confirmed=False), "rejected as a whole")
+    def test_rejecting_the_subject_as_a_whole_rejects_every_bone(self):
+        response = self.submit("alice", self.reading, quality_check_confirmed=False, comment="hip implant")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["subject_rejected"])
+        [reading] = self.study.readings()
+        self.assertTrue(reading.subject_rejected)
+        self.assertEqual(reading.verdicts, dict.fromkeys(BONES, "reject"))
+        self.assertEqual(reading.comment, "hip implant")
+
+    def test_the_readings_csv_shows_rejected_subjects(self):
+        self.submit("alice", self.reading, quality_check_confirmed=False, comment="hip implant")
+        self.submit("alice", self.handout("alice"), rejected=["TIBIA_LEFT"])
+        rows = list(csv.DictReader(io.StringIO(readings_csv(self.study.study(), self.study.readings()))))
+        first = [(row["bone"], row["verdict"], row["subject_rejected"]) for row in rows if row["position"] == "1"]
+        second = [(row["bone"], row["verdict"], row["subject_rejected"]) for row in rows if row["position"] == "2"]
+        self.assertEqual(first, [(bone, "reject", "true") for bone in BONES])
+        self.assertEqual(
+            second,
+            [("FEMUR_LEFT", "accept", "false"), ("FEMUR_RIGHT", "accept", "false"), ("TIBIA_LEFT", "reject", "false")],
+        )
 
     def test_a_reading_uploads_nothing(self):
         upload = {"segmentation": ("seg.seg.nrrd", b"not a file", "application/octet-stream")}
@@ -570,10 +589,11 @@ class ResultsTests(StudyTestCase):
     def test_the_readings_csv_has_a_row_per_bone_per_reading(self):
         rows = list(csv.DictReader(io.StringIO(self.results().read("readings.csv").decode("utf-8"))))
         self.assertEqual(len(rows), 4 * 12 * 3)
-        self.assertEqual(set(rows[0]), {"rater", "subject", "reading", "position", "bone", "verdict", "handed_out_at",
-                                        "submitted_at", "comment"})
+        self.assertEqual(set(rows[0]), {"rater", "subject", "reading", "position", "bone", "verdict", "subject_rejected",
+                                        "handed_out_at", "submitted_at", "comment"})
         self.assertEqual({row["rater"] for row in rows}, {"A", "B", "C", "D"})
         self.assertEqual({row["verdict"] for row in rows}, {"accept", "reject"})
+        self.assertEqual({row["subject_rejected"] for row in rows}, {"false"})
 
     def test_the_results_csv_has_every_comparison(self):
         rows = list(csv.DictReader(io.StringIO(self.results().read("results.csv").decode("utf-8"))))

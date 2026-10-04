@@ -7,12 +7,13 @@ study server as it does on a quality-check server:
 2. ``POST /api/v1/subjects/next``                 - the rater's next reading
 3. ``GET  /api/v1/assignments/{id}/image``        - its image, from the dataset
 4. ``GET  /api/v1/assignments/{id}/segmentation`` - its segmentation: the study's copy
-5. ``POST /api/v1/assignments/{id}/submit``       - a verdict on every bone, accept or reject
+5. ``POST /api/v1/assignments/{id}/submit``       - the verdict, as in the quality check
 
 Only the review page, in the reviewer role, works with a study server: there is nothing for
 3D Slicer to do here. A submission is the review page's ``metadata`` part, read as a
-:class:`~qc_server.models.SubmissionRequest`; rejecting the subject as a whole, reporting a
-bone missing and uploading a segmentation are refused.
+:class:`~qc_server.models.SubmissionRequest`, as a reviewer's verdict in the quality check:
+every bone accepted or rejected, or the subject rejected as a whole. Reporting a bone missing
+and uploading a segmentation are refused.
 """
 
 from __future__ import annotations
@@ -172,7 +173,8 @@ def submit(
     user: User = Depends(get_rater),
 ) -> ReadingResult:
     """Record the reading: every bone of the segmentation accepted (``confirmed_labels``) or
-    rejected (``rejected_labels``), and nothing else."""
+    rejected (``rejected_labels``); or, with ``quality_check_confirmed=false``, the subject
+    rejected as a whole."""
     try:
         payload = SubmissionRequest(**json.loads(metadata))
     except json.JSONDecodeError as exc:
@@ -181,17 +183,17 @@ def submit(
         raise QCError(f"Invalid submission metadata: {exc}") from exc
     if segmentation is not None:
         raise QCError("A study reading uploads nothing: give each bone a verdict, accept or reject.")
-    if not payload.quality_check_confirmed:
-        raise QCError(
-            "In the study every bone gets a verdict of its own, so the subject cannot be rejected as a whole. "
-            "Accept or reject each bone."
-        )
     if payload.missing_labels:
         raise QCError("The study takes no reports of missing bones: accept or reject each bone of the segmentation.")
-    if not payload.use_stored_segmentation:
+    if payload.quality_check_confirmed and not payload.use_stored_segmentation:
         raise QCError("A study reading judges the segmentation as it is: set use_stored_segmentation.")
     return get_study(request).submit(
-        assignment_id, user, payload.confirmed_labels, payload.rejected_labels, payload.comment
+        assignment_id,
+        user,
+        payload.confirmed_labels,
+        payload.rejected_labels,
+        payload.comment,
+        subject_rejected=not payload.quality_check_confirmed,
     )
 
 
