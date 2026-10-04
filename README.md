@@ -224,7 +224,7 @@ This is where you decide. The **Showing** menu picks what to list:
 | Showing | Lists subjects that… |
 | --- | --- |
 | waiting for approval (default) | are ready for you to approve |
-| sent to you by an editor | are escalated |
+| escalated by an editor | an editor could not correct, and sent to you |
 | rejected subjects | a reviewer rejected as a whole |
 | waiting for a reviewer | are in progress, at a reviewer |
 | waiting for an editor | are in progress, at an editor |
@@ -265,7 +265,7 @@ ticked, never more, and each subject only as it was listed: one that changed sin
 somebody gave a verdict on it or took it, is left out and reported. Refresh and look again.
 
 You can also tick a subject that does **not** wait for approval: one a reviewer rejected, one
-an editor sent you, one waiting for a reviewer, or one you closed. The dialog says so first.
+an editor escalated, one waiting for a reviewer, or one you closed. The dialog says so first.
 Approving it sets only the labels a reviewer accepted to `2`. The labels nobody accepted keep
 the status they have in `Subject_info`, normally `1`, so they stay marked as not reviewed. An
 editor's correction waiting on the server is written into the dataset all the same.
@@ -357,7 +357,7 @@ under **Latest**. Then:
   written: the label statuses and the segmentation stay as they are;
 - **To reviewers**, if you disagree with the reviewer: every label is judged again.
 
-**Deal with an escalated subject.** Show *sent to you by an editor* and read the editor's
+**Deal with an escalated subject.** Show *escalated by an editor* and read the editor's
 comment under **Latest**. Then:
 
 - **To editors**, with a comment saying what to do, if it can be fixed after all;

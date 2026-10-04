@@ -614,7 +614,7 @@
             <label for="stageFilter">Showing</label>
             <select id="stageFilter">
               <option value="approval">waiting for approval</option>
-              <option value="escalated">sent to you by an editor</option>
+              <option value="escalated">escalated by an editor</option>
               <option value="rejected">rejected subjects</option>
               <option value="review">waiting for a reviewer</option>
               <option value="edit">waiting for an editor</option>
@@ -1029,7 +1029,7 @@
       // A step of a subject's history, in words: "rita reviewed".
       function stepText(e) {
         var what = {
-          review: "reviewed", reject: "rejected the subject", edit: "corrected", escalate: "sent it to you",
+          review: "reviewed", reject: "rejected the subject", edit: "corrected", escalate: "could not correct it",
           approve: "approved",
           "return": "sent it back", close: "closed"
         }[e.action] || e.action;
@@ -1209,7 +1209,7 @@
       function verdictText(a) {
         if (a.state !== "submitted") { return ""; }
         if (a.role === "editor") {
-          if (!a.quality_check_confirmed) { return "sent to you"; }
+          if (!a.quality_check_confirmed) { return "could not correct it"; }
           var edited = (a.edited_labels || []).length;
           var removed = (a.removed_labels || []).length;
           return "corrected " + edited + (removed ? ", removed " + removed : "");
