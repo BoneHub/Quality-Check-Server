@@ -443,8 +443,13 @@
     }
 
     .checks.wrap {
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
       gap: 6px 16px;
+    }
+
+    .checks.wrap label.inline {
+      white-space: normal;
     }
 
     .inputs {
@@ -1834,7 +1839,10 @@
           $("stRaters").innerHTML = '<span class="muted">No users yet: create the raters under Create user, then tick them here.</span>';
           return;
         }
-        $("stRaters").innerHTML = listedUsers.map(function (u) {
+        var byName = listedUsers.slice().sort(function (a, b) {
+          return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+        });
+        $("stRaters").innerHTML = byName.map(function (u) {
           var problem = raterProblem(u);
           var ticked = chosenRaters.indexOf(u.name) !== -1;
           return '<label class="inline"' + (problem ? ' title="Cannot be a rater: ' + esc(problem) + '"' : "") + ">" +
