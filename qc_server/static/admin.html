@@ -443,13 +443,16 @@
     }
 
     .checks.wrap {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 6px 16px;
+      display: block;
+      columns: 220px;
+      column-gap: 16px;
     }
 
     .checks.wrap label.inline {
+      display: flex;
+      margin-bottom: 6px;
       white-space: normal;
+      break-inside: avoid;
     }
 
     .inputs {
