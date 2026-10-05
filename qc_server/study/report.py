@@ -53,10 +53,12 @@ PNG_DPI = 200
 #: Past this many raters the pair grid leaves its numbers to the table.
 MAX_LABELLED_RATERS = 10
 
+#: Each figure's file name, after its number. The figures are numbered in the order the report
+#: shows them, counting only those drawn, so the numbers have no gap.
 FIGURE_NAMES = {
-    "intra": "figure1_intra_rater",
-    "pairs": "figure2_inter_rater_pairs",
-    "group": "figure3_inter_rater_group",
+    "intra": "intra_rater",
+    "pairs": "inter_rater_pairs",
+    "group": "inter_rater_group",
 }
 
 _figure_lock = threading.Lock()
@@ -294,18 +296,18 @@ def draw_figures(results: Results) -> dict[str, tuple[bytes, bytes]]:
     once there are readings to compare."""
     import matplotlib
 
-    figures: dict[str, tuple[bytes, bytes]] = {}
+    drawn: dict[str, tuple[bytes, bytes]] = {}
     with _figure_lock, matplotlib.rc_context(_STYLE):
         if _intra_measured(results):
             rows = _intra_rows(results)
-            figures[FIGURE_NAMES["intra"]] = _render(_dot_panels(rows, summary_last=results.intra_group is not None))
+            drawn["intra"] = _render(_dot_panels(rows, summary_last=results.intra_group is not None))
         if len(results.codes) >= 3 and _inter_measured(results):
-            figures[FIGURE_NAMES["pairs"]] = _render(_pair_grid(results))
+            drawn["pairs"] = _render(_pair_grid(results))
         if _inter_measured(results):
             rows = [(f"{a}–{b}", found) for a, b, found in results.pairs] if len(results.codes) >= 3 else []
             rows.append(("All raters", results.group))
-            figures[FIGURE_NAMES["group"]] = _render(_dot_panels(rows, summary_last=True))
-    return figures
+            drawn["group"] = _render(_dot_panels(rows, summary_last=True))
+    return {f"figure{number}_{FIGURE_NAMES[key]}": files for number, (key, files) in enumerate(drawn.items(), 1)}
 
 
 _STYLE = {
@@ -580,7 +582,6 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
             _figure(
                 figures,
                 "intra",
-                1,
                 (
                     "Intra-rater reliability for each rater and for all raters together: estimate (dot) and 95% "
                     "interval (line)."
@@ -609,7 +610,6 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
                 _figure(
                     figures,
                     "pairs",
-                    2,
                     "Krippendorff's α of each pair of raters, darker for higher, with their % agreement below it.",
                 )
             )
@@ -617,7 +617,6 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
             _figure(
                 figures,
                 "group",
-                3,
                 (
                     "Inter-rater reliability for each pair of raters and for all raters together: estimate (dot) and "
                     "95% interval (line)."
@@ -730,18 +729,22 @@ def _progress_table(results: Results) -> str:
     )
 
 
-def _figure(figures: dict[str, tuple[bytes, bytes]], key: str, number: int, caption: str) -> str:
-    """A figure, its SVG inside the page as a data URI -- each its own document, so the ids of
-    one figure's glyphs and clip paths cannot clash with another's."""
-    svg = figures.get(FIGURE_NAMES[key], (b"", b""))[0]
-    image = (
-        f'<img alt="Figure {number}" src="data:image/svg+xml;base64,{base64.b64encode(svg).decode("ascii")}">'
-        if svg
-        else ""
+def _figure(figures: dict[str, tuple[bytes, bytes]], key: str, caption: str) -> str:
+    """A figure, numbered as :func:`draw_figures` numbered it, its SVG inside the page as a data
+    URI -- each its own document, so the ids of one figure's glyphs and clip paths cannot clash
+    with another's. Nothing if it was not drawn."""
+    found = next(
+        ((number, stem) for number, stem in enumerate(figures, 1) if stem == f"figure{number}_{FIGURE_NAMES[key]}"),
+        None,
     )
+    if found is None:
+        return ""
+    number, stem = found
+    svg = figures[stem][0]
     return (
-        f"<figure>{image}<figcaption><b>Figure {number}.</b> {html.escape(caption)} "
-        f"<span class=\"file\">({FIGURE_NAMES[key]}.svg / .png)</span></figcaption></figure>"
+        f'<figure><img alt="Figure {number}" src="data:image/svg+xml;base64,{base64.b64encode(svg).decode("ascii")}">'
+        f"<figcaption><b>Figure {number}.</b> {html.escape(caption)} "
+        f"<span class=\"file\">({stem}.svg / .png)</span></figcaption></figure>"
     )
 
 

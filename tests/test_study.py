@@ -629,6 +629,20 @@ class ResultsTests(StudyTestCase):
         first = self.results().read("results.csv")
         self.assertEqual(self.results().read("results.csv"), first)
 
+    def test_the_figures_are_numbered_without_a_gap(self):
+        # Two raters: no pair grid, so the inter-rater figure is the second.
+        self.client.delete("/admin/api/study", headers=self.admin)
+        self.start(raters=["zoltan_k", "ophelia_w"])
+        self.read_all("zoltan_k")
+        self.read_all("ophelia_w", reject=lambda handout, bone: bone == "TIBIA_LEFT")
+        self.assertEqual(sorted(n for n in self.results().namelist() if n.endswith(".svg")),
+                         ["figures/figure1_intra_rater.svg", "figures/figure2_inter_rater_group.svg"])
+        report = self.client.get("/admin/api/study/report", headers=self.admin).text
+        self.assertIn("<b>Figure 1.</b> Intra-rater", report)
+        self.assertIn("<b>Figure 2.</b> Inter-rater", report)
+        self.assertIn("(figure2_inter_rater_group.svg / .png)", report)
+        self.assertNotIn("Figure 3", report)
+
     def test_the_report_is_provisional_while_the_study_runs(self):
         self.client.delete("/admin/api/study", headers=self.admin)
         self.start()
