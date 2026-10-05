@@ -547,13 +547,13 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
         "</tbody></table>",
         "<h2>Completeness</h2>",
         _progress_table(results),
-        "<h2>Method</h2>",
+        "<h2>How to read this report</h2>",
         _METHOD,
         "<h2>Intra-rater reliability</h2>",
     ]
     if results.intra and _intra_measured(results):
         parts += [
-            "<p>Each rater's readings of the same bone, compared with each other.</p>",
+            "<p>Does each rater agree with themselves? Each rater's readings of the same bone, compared.</p>",
             _figure(figures, "intra", 1, "Intra-rater reliability per rater: estimate (dot) and 95% interval (line)."),
             _agreement_table([(f"Rater {code}", found) for code, found in results.intra], "Rater"),
         ]
@@ -567,7 +567,8 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
         parts.append("<p>Nothing to compare yet: no subject has been read by two raters.</p>")
     elif results.group is not None:
         parts += [
-            "<p>The raters' first readings of each bone. All raters together:</p>",
+            "<p>Do the raters agree with each other? Their first readings of each bone, compared. "
+            "All raters together:</p>",
             _tiles(results.group),
         ]
         if len(results.codes) >= 3:
@@ -608,19 +609,39 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
 
 _METHOD = """
 <ul class="method">
-<li><b>Items.</b> Every bone of every study subject, judged <i>accept</i> or <i>reject</i> at each reading. A
-reading that rejects the subject as a whole rejects each of its bones.</li>
-<li><b>Intra-rater</b> compares one rater's readings of an item; <b>inter-rater</b> compares the raters'
-first readings of it, for each pair of raters and for all of them together.</li>
-<li><b>% agreement</b>: per item, the share of pairs of verdicts that agree, averaged over the items with two
-verdicts or more (Gwet's p<sub>a</sub>).</li>
-<li><b>Krippendorff's α</b> (nominal): agreement corrected for chance; 1 is perfect, 0 is chance. Undefined
-when every verdict is the same.</li>
-<li><b>Gwet's AC1</b>: agreement corrected for chance in a way that stays meaningful when one verdict is rare,
-as rejects usually are; there α can be low even when the raters nearly always agree.</li>
-<li><b>95% intervals</b>: percentile bootstrap, resampling whole subjects with replacement, since the bones of
-one subject are not independent; drawn with the study's seed.</li>
+<li><b>What was judged.</b> Every bone of every study subject, <i>accept</i> or <i>reject</i>, at each
+reading. Rejecting a whole subject counts as rejecting each of its bones. The <i>Items</i> in the tables are
+these bones.</li>
+<li><b>Intra-rater: does a rater agree with themselves?</b> Each rater read the same subjects more than once,
+with other subjects in between. Their readings of each bone are compared. One result per rater.</li>
+<li><b>Inter-rater: do the raters agree with each other?</b> Their first readings of each bone are compared,
+for each pair of raters, which shows who disagrees with whom, and for all raters together, which gives one
+result for the whole team. Later readings are left out here: they are the same rater looking again.</li>
+<li><b>% agreement: how often the verdicts match.</b> For two raters, or one rater's two readings, the share
+of bones given the same verdict. For all raters together: for each bone, the share of pairs of raters who gave
+it the same verdict, averaged over the bones.</li>
+<li><b>Gwet's AC1: agreement with the part due to luck taken out.</b> 1 is perfect agreement, 0 is no better
+than luck; as a rough guide, above 0.8 is good. When most bones are accepted, raters agree on many of them
+even without looking closely, so % agreement looks better than it really is. AC1 removes that luck and stays
+fair when rejects are rare.</li>
+<li><b>Krippendorff's α: whether the raters reject the same bones.</b> Also 1 for perfect and 0 for luck, but
+stricter about luck: raters who did not look at all, accepting at random as often as these raters did, would
+still agree on most bones. So agreeing on accepts counts for little, and a few disagreements on the rare
+rejects pull α down a lot. For example, at 95% agreement with 5% of verdicts rejects, AC1 is 0.94 but α is
+0.47. α is shown because it is the best-known measure. It is <i>n/a</i> when every verdict was the same, as
+nothing then tells agreement from luck.</li>
+<li><b>Rejected</b> (in the tables): the share of verdicts that were rejects. The rarer they are, the further
+apart AC1 and α can be.</li>
+<li><b>95% interval: how sure each number is.</b> With other subjects, the numbers would come out slightly
+different. The interval is the range the true value very likely lies in: a narrow one can be trusted, a wide
+one means more subjects are needed. It comes from reshuffling the study's own subjects into many pretend
+studies (see <i>Bootstrap samples</i> above), some subjects drawn twice and some not at all, and keeping the
+middle 95% of the results. Whole subjects are drawn, since the bones of one scan tend to be judged together.
+The draws use the study's seed, so the same readings always give the same intervals.</li>
 </ul>
+<p class="foot">Technical details: % agreement is Gwet's p<sub>a</sub>; α is Krippendorff's alpha for nominal
+data (Krippendorff 2011); AC1 is Gwet's AC1 (Gwet 2008); intervals are percentile bootstrap intervals,
+resampling subjects with replacement.</p>
 """
 
 _CSS = """
