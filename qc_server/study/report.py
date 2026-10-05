@@ -1,7 +1,8 @@
 """A study's results: the numbers, the figures, the report, and the CSV files.
 
 * **Items** are the bones of the study's subjects, each judged accept or reject. A reading that
-  rejects the subject as a whole rejects each of its bones.
+  rejects the subject as a whole gives each of its bones a third verdict, ``subject_rejected``:
+  a rejected bone can be corrected, a rejected subject is not used at all, so the two disagree.
 * **Intra-rater**: each rater's readings of an item, compared with each other, for each rater
   and for all of them together (every rater's items side by side).
 * **Inter-rater**: the raters' first readings of an item, for each pair of raters and for all
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .. import __version__
-from .models import VERDICTS, Reading, Study
+from .models import REJECT, SUBJECT_REJECTED, VERDICTS, Reading, Study
 from .reliability import Agreement, Estimate, agreement
 
 # Chart colours: one categorical hue for the marks, one blue ramp for magnitude, and inks and
@@ -111,10 +112,10 @@ def compute_results(study: Study, readings: list[Reading]) -> Results:
     unit_index = {unit: index for index, unit in enumerate(units)}
     subject_index = {subject.subject_key: index for index, subject in enumerate(study.subjects)}
     subject_of_unit = np.array([subject_index[key] for key, _ in units], dtype=int)
-    verdicts_of = {(reading.code, reading.subject_key, reading.reading): reading.verdicts for reading in readings}
+    verdicts_of = {(reading.code, reading.subject_key, reading.reading): counted_verdicts(reading) for reading in readings}
 
     def counts(sources: list[tuple[str, int]]) -> np.ndarray:
-        """Per item, how many of these readings (code, reading number) accept it and reject it."""
+        """Per item, how many of these readings (code, reading number) give it each verdict."""
         table = np.zeros((len(units), len(VERDICTS)))
         for code, number in sources:
             for subject in study.subjects:
@@ -147,6 +148,14 @@ def compute_results(study: Study, readings: list[Reading]) -> Results:
         # a subject with every rater's readings of it.
         results.intra_group = measure(np.vstack([repeats[code] for code in codes]), np.tile(subject_of_unit, len(codes)))
     return results
+
+
+def counted_verdicts(reading: Reading) -> dict[str, str]:
+    """Each bone's verdict as the statistics count it: ``subject_rejected`` for every bone of a
+    reading that rejected the subject as a whole."""
+    if reading.subject_rejected:
+        return dict.fromkeys(reading.verdicts, SUBJECT_REJECTED)
+    return dict(reading.verdicts)
 
 
 # ------------------------------------------------------------------ the files
@@ -189,21 +198,21 @@ def results_zip(files: ReportFiles) -> bytes:
 
 # ----------------------------------------------------------------------- CSV
 def readings_csv(study: Study, readings: list[Reading]) -> str:
-    """One row per bone per reading, with the rater's code in place of their name.
-    ``subject_rejected`` marks a reading that rejected the subject as a whole, and so each of
-    its bones."""
+    """One row per bone per reading, with the rater's code in place of their name, and the
+    verdict as the statistics count it: accept, reject, or subject_rejected."""
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(
         [
-            "rater", "subject", "reading", "position", "bone", "verdict", "subject_rejected",
-            "handed_out_at", "submitted_at", "comment",
+            "rater", "subject", "reading", "position", "bone", "verdict", "handed_out_at", "submitted_at",
+            "comment",
         ]
     )  # fmt: skip
     bones_of = {subject.subject_key: subject.bones for subject in study.subjects}
     for reading in sorted(readings, key=lambda r: (_code_order(r.code), r.position)):
-        for bone in bones_of.get(reading.subject_key, sorted(reading.verdicts)):
-            if bone not in reading.verdicts:
+        verdicts = counted_verdicts(reading)
+        for bone in bones_of.get(reading.subject_key, sorted(verdicts)):
+            if bone not in verdicts:
                 continue
             writer.writerow(
                 [
@@ -212,8 +221,7 @@ def readings_csv(study: Study, readings: list[Reading]) -> str:
                     reading.reading,
                     reading.position,
                     bone,
-                    reading.verdicts[bone],
-                    "true" if reading.subject_rejected else "false",
+                    verdicts[bone],
                     reading.handed_at,
                     reading.submitted_at,
                     reading.comment or "",
@@ -229,7 +237,7 @@ def results_csv(results: Results) -> str:
     writer.writerow(
         [
             "comparison", "raters", "subjects", "items", "verdicts", "rejected_percent",
-            "agreement_percent", "agreement_low", "agreement_high",
+            "subject_rejected_percent", "agreement_percent", "agreement_low", "agreement_high",
             "alpha", "alpha_low", "alpha_high", "ac1", "ac1_low", "ac1_high",
         ]
     )  # fmt: skip
@@ -251,7 +259,8 @@ def results_csv(results: Results) -> str:
                 found.subjects,
                 found.items,
                 found.values,
-                number(_rejected(found), 100),
+                number(_share(found, REJECT), 100),
+                number(_share(found, SUBJECT_REJECTED), 100),
                 number(found.agreement.value, 100),
                 number(found.agreement.low, 100),
                 number(found.agreement.high, 100),
@@ -266,9 +275,9 @@ def results_csv(results: Results) -> str:
     return out.getvalue()
 
 
-def _rejected(found: Agreement) -> float | None:
-    """The share of reject verdicts among those compared."""
-    return found.shares[VERDICTS.index("reject")] if found.shares else None
+def _share(found: Agreement, verdict: str) -> float | None:
+    """The share of this verdict among those compared."""
+    return found.shares[VERDICTS.index(verdict)] if found.shares else None
 
 
 # ------------------------------------------------------------------- figures
@@ -641,9 +650,11 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
 
 _METHOD = """
 <ul class="method">
-<li><b>What was judged.</b> Every bone of every study subject, <i>accept</i> or <i>reject</i>, at each
-reading. Rejecting a whole subject counts as rejecting each of its bones. The <i>Items</i> in the tables are
-these bones.</li>
+<li><b>What was judged.</b> Every bone of every study subject, at each reading: <i>accept</i>, <i>reject</i>,
+or <i>subject rejected</i> when the rater rejected the whole subject. A rejected subject is a verdict of its
+own, not a reject of each bone: a rejected bone can be corrected, a rejected subject is not used at all. So a
+rater who rejects every bone and one who rejects the subject disagree on each bone. The <i>Items</i> in the
+tables are these bones.</li>
 <li><b>Intra-rater: does a rater agree with themselves?</b> Each rater read the same subjects more than once,
 with other subjects in between. Their readings of each bone are compared, for each rater, which shows who is
 less consistent, and for all raters together, which gives one result for the whole team.</li>
@@ -661,11 +672,12 @@ fair when rejects are rare.</li>
 <li><b>Krippendorff's α: whether the raters reject the same bones.</b> Also 1 for perfect and 0 for luck, but
 stricter about luck: raters who did not look at all, accepting at random as often as these raters did, would
 still agree on most bones. So agreeing on accepts counts for little, and a few disagreements on the rare
-rejects pull α down a lot. For example, at 95% agreement with 5% of verdicts rejects, AC1 is 0.94 but α is
+rejects pull α down a lot. For example, at 95% agreement with 5% of verdicts rejects, AC1 is 0.95 but α is
 0.47. α is shown because it is the best-known measure. It is <i>n/a</i> when every verdict was the same, as
 nothing then tells agreement from luck.</li>
-<li><b>Rejected</b> (in the tables): the share of verdicts that were rejects. The rarer they are, the further
-apart AC1 and α can be.</li>
+<li><b>Rejected</b> and <b>Subject rejected</b> (in the tables): the share of verdicts that rejected a bone,
+and that rejected the whole subject, counted per bone. The rarer they are, the further apart AC1 and α can
+be.</li>
 <li><b>95% interval: how sure each number is.</b> With other subjects, the numbers would come out slightly
 different. The interval is the range the true value very likely lies in: a narrow one can be trusted, a wide
 one means more subjects are needed. It comes from reshuffling the study's own subjects into many pretend
@@ -763,13 +775,15 @@ def _tiles(found: Agreement) -> str:
 def _agreement_table(rows: list[tuple[str, Agreement]], first: str) -> str:
     head = (
         f"<tr><th>{html.escape(first)}</th><th class=\"num\">Subjects</th><th class=\"num\">Items</th>"
-        '<th class="num">Rejected</th><th class="num">% agreement</th><th class="num">95% interval</th>'
+        '<th class="num">Rejected</th><th class="num">Subject rejected</th><th class="num">% agreement</th>'
+        '<th class="num">95% interval</th>'
         '<th class="num">α</th><th class="num">95% interval</th><th class="num">AC1</th>'
         '<th class="num">95% interval</th></tr>'
     )
     body = "".join(
         f"<tr><td>{html.escape(label)}</td><td class=\"num\">{found.subjects}</td><td class=\"num\">{found.items}</td>"
-        f"<td class=\"num\">{_percent(_rejected(found))}</td>"
+        f"<td class=\"num\">{_percent(_share(found, REJECT))}</td>"
+        f"<td class=\"num\">{_percent(_share(found, SUBJECT_REJECTED))}</td>"
         f"<td class=\"num\">{_value(found.agreement, True)}</td><td class=\"num\">{_interval(found.agreement, True)}</td>"
         f"<td class=\"num\">{_value(found.alpha, False)}</td><td class=\"num\">{_interval(found.alpha, False)}</td>"
         f"<td class=\"num\">{_value(found.ac1, False)}</td><td class=\"num\">{_interval(found.ac1, False)}</td></tr>"

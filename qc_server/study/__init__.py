@@ -16,13 +16,14 @@ stands for them in the results, and fixes each rater's list (:mod:`.schedule`).
 
 Raters work on the review page as reviewers do, through the same endpoints (:mod:`.api`), and
 judge each reading as in the quality check, but for missing bones, which a study takes no
-reports of: every bone accepted or rejected, or the subject rejected as a whole, which rejects
-every bone. Each reading is blind -- no history, no earlier verdict, and the subject's
+reports of: every bone accepted or rejected, or the subject rejected as a whole, which the
+statistics count as a verdict of its own on every bone. Each reading is blind -- no history, no earlier verdict, and the subject's
 id only if the study shows it. A rater holds one reading at a time, the next in their list;
 several raters can read one subject at once.
 
 The results (:mod:`.reliability`, :mod:`.report`) are % agreement, Krippendorff's alpha and
-Gwet's AC1 on the bones' accept-or-reject verdicts, with 95% bootstrap intervals, as a report
+Gwet's AC1 on the bones' verdicts -- accept, reject, or subject rejected -- with 95% bootstrap
+intervals, as a report
 with figures and as CSV files, with codes in place of names throughout.
 
 A study server never writes into the dataset, which it can mount read-only. What it keeps

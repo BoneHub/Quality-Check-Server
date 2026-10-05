@@ -24,7 +24,8 @@ from qc_server.config import ENV_PREFIX
 from qc_server.models import EDITOR, REVIEWER, SubmissionRequest
 from qc_server.review import STATIC_DIR
 from qc_server.study.app import create_study_app
-from qc_server.study.report import readings_csv
+from qc_server.study.models import Reading
+from qc_server.study.report import compute_results, readings_csv
 from qc_server.study.store import StudyStore
 
 from tests.support import QCTestCase, write_mask
@@ -464,13 +465,26 @@ class VerdictTests(StudyTestCase):
         self.submit("alice", self.reading, quality_check_confirmed=False, comment="hip implant")
         self.submit("alice", self.handout("alice"), rejected=["TIBIA_LEFT"])
         rows = list(csv.DictReader(io.StringIO(readings_csv(self.study.study(), self.study.readings()))))
-        first = [(row["bone"], row["verdict"], row["subject_rejected"]) for row in rows if row["position"] == "1"]
-        second = [(row["bone"], row["verdict"], row["subject_rejected"]) for row in rows if row["position"] == "2"]
-        self.assertEqual(first, [(bone, "reject", "true") for bone in BONES])
-        self.assertEqual(
-            second,
-            [("FEMUR_LEFT", "accept", "false"), ("FEMUR_RIGHT", "accept", "false"), ("TIBIA_LEFT", "reject", "false")],
-        )
+        first = [(row["bone"], row["verdict"]) for row in rows if row["position"] == "1"]
+        second = [(row["bone"], row["verdict"]) for row in rows if row["position"] == "2"]
+        self.assertEqual(first, [(bone, "subject_rejected") for bone in BONES])
+        self.assertEqual(second, [("FEMUR_LEFT", "accept"), ("FEMUR_RIGHT", "accept"), ("TIBIA_LEFT", "reject")])
+
+    def test_rejecting_the_subject_and_rejecting_every_bone_disagree(self):
+        """A rejected bone can be corrected; a rejected subject is not used at all."""
+        study = self.study.study()
+        first, second = (rater.code for rater in study.raters[:2])
+
+        def reading(code: str, subject_rejected: bool = False) -> Reading:
+            return Reading(
+                assignment_id=code, rater=code, code=code, position=1, subject_key=GOOD[0], reading=1, handed_at="",
+                submitted_at="", verdicts=dict.fromkeys(BONES, "reject"), subject_rejected=subject_rejected,
+            )  # fmt: skip
+
+        every_bone = compute_results(study, [reading(first), reading(second)]).group
+        self.assertEqual((every_bone.items, every_bone.agreement.value), (3, 1.0))
+        one_subject = compute_results(study, [reading(first), reading(second, subject_rejected=True)]).group
+        self.assertEqual((one_subject.items, one_subject.agreement.value), (3, 0.0))
 
     def test_a_reading_uploads_nothing(self):
         upload = {"segmentation": ("seg.seg.nrrd", b"not a file", "application/octet-stream")}
@@ -589,11 +603,10 @@ class ResultsTests(StudyTestCase):
     def test_the_readings_csv_has_a_row_per_bone_per_reading(self):
         rows = list(csv.DictReader(io.StringIO(self.results().read("readings.csv").decode("utf-8"))))
         self.assertEqual(len(rows), 4 * 12 * 3)
-        self.assertEqual(set(rows[0]), {"rater", "subject", "reading", "position", "bone", "verdict", "subject_rejected",
-                                        "handed_out_at", "submitted_at", "comment"})
+        self.assertEqual(set(rows[0]), {"rater", "subject", "reading", "position", "bone", "verdict", "handed_out_at",
+                                        "submitted_at", "comment"})
         self.assertEqual({row["rater"] for row in rows}, {"A", "B", "C", "D"})
         self.assertEqual({row["verdict"] for row in rows}, {"accept", "reject"})
-        self.assertEqual({row["subject_rejected"] for row in rows}, {"false"})
 
     def test_the_results_csv_has_every_comparison(self):
         rows = list(csv.DictReader(io.StringIO(self.results().read("results.csv").decode("utf-8"))))

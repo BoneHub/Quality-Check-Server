@@ -21,8 +21,13 @@ Verdict = Literal["accept", "reject"]
 ACCEPT: Verdict = "accept"
 REJECT: Verdict = "reject"
 
-#: The verdicts, in the order the statistics number them.
-VERDICTS: tuple[Verdict, ...] = (ACCEPT, REJECT)
+#: What the statistics count for each bone of a subject rejected as a whole. It is a verdict of
+#: its own, not a reject of each bone: a rejected bone can be corrected, a rejected subject is
+#: not used at all.
+SUBJECT_REJECTED = "subject_rejected"
+
+#: The verdicts the statistics count, in the order they number them.
+VERDICTS: tuple[str, ...] = (ACCEPT, REJECT, SUBJECT_REJECTED)
 
 #: The most readings of each subject a rater can be given.
 MAX_READINGS_PER_RATER = 20
@@ -176,7 +181,7 @@ class HeldReading(BaseModel):
 
 class Reading(BaseModel):
     """A reading as it was submitted: a verdict on every bone of the subject. Rejecting the
-    subject as a whole rejects every bone."""
+    subject as a whole rejects every bone, which the statistics count as ``subject_rejected``."""
 
     assignment_id: str
     rater: str

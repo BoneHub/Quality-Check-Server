@@ -997,8 +997,9 @@ The readings in between are of the study's other subjects. There are no dummy su
 - **A reading is judged as in the quality check**, on the same page with the same buttons,
   except that there is no missing-bone report: every bone accepted or rejected, or **Reject
   subject**. What the page says of where a verdict goes differs too, since nothing goes
-  anywhere. Rejecting the subject counts as a reject of each of its bones. The comment goes into
-  `readings.csv`, not into the numbers.
+  anywhere. Rejecting the subject is counted apart from rejecting its bones: a rejected bone can
+  be corrected, a rejected subject is not used at all. The comment goes into `readings.csv`, not
+  into the numbers.
 - A rater holds one reading at a time, the next in their list. Several raters can read the same
   subject at the same time. A reading has no lease time and cannot be skipped: **Release** hands
   it back, and it is still the rater's next reading. A rater who leaves finds the same reading
@@ -1019,7 +1020,7 @@ provisional.
 | `figures/figure1_intra_rater.svg`, `.png` | Intra-rater reliability of each rater and of all raters together: % agreement, α and AC1, with 95% intervals. Two readings per rater or more |
 | `figures/figure2_inter_rater_pairs.svg`, `.png` | α of each pair of raters, with their % agreement. Three raters or more |
 | `figures/figure3_inter_rater_group.svg`, `.png` | Inter-rater reliability of each pair and of all raters together, with 95% intervals. Two raters or more |
-| `readings.csv` | One row per bone per reading: rater code, subject, reading number, position in the rater's list, bone, verdict, whether the reading rejected the subject as a whole (`subject_rejected`), times and comment |
+| `readings.csv` | One row per bone per reading: rater code, subject, reading number, position in the rater's list, bone, verdict (`accept`, `reject`, or `subject_rejected` when the reading rejected the subject as a whole), times and comment |
 | `results.csv` | Every number of the report, with its interval |
 
 The figures are numbered in the order the report shows them, counting only those the study
@@ -1027,7 +1028,8 @@ allows. With two raters, for example, there is no pair grid, and the inter-rater
 `figure2_inter_rater_group`.
 
 **The measures.** An *item* is a bone of a study subject, accepted or rejected. A reading that
-rejects the subject as a whole rejects each of its bones. Intra-rater reliability compares a
+rejects the subject as a whole gives each of its bones a third verdict, *subject rejected*, so
+that a rater who rejects every bone and one who rejects the subject disagree. Intra-rater reliability compares a
 rater's readings of an item; inter-rater reliability compares the raters' first readings of it.
 Both are measured for each rater, or each pair of raters, and for all raters together, which the
 report shows first. The report explains each measure in plain words.
@@ -1038,7 +1040,7 @@ report shows first. The report explains each measure in plain words.
   every verdict is the same.
 - **Gwet's AC1**: agreement corrected for chance in a way that stays meaningful when one verdict
   is rare. Rejects usually are, and then α, like Cohen's κ, can be low although the raters nearly
-  always agree: with 5% of bones rejected and 93% agreement, α ≈ 0.26 but AC1 ≈ 0.92. Report both.
+  always agree: with 5% of bones rejected and 93% agreement, α ≈ 0.26 but AC1 ≈ 0.93. Report both.
 - **95% intervals**: a percentile bootstrap that resamples whole subjects, since the bones of one
   subject are not independent, drawn with the study's seed. The same readings always give the
   same numbers.
