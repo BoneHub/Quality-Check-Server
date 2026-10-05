@@ -1016,7 +1016,7 @@ provisional.
 | File | What it holds |
 | --- | --- |
 | `report.html` | The settings, how complete each rater's readings are, the figures, and a table of the numbers beside each. One self-contained page, to share with the raters |
-| `figures/figure1_intra_rater.svg`, `.png` | Intra-rater reliability per rater: % agreement, α and AC1, with 95% intervals |
+| `figures/figure1_intra_rater.svg`, `.png` | Intra-rater reliability of each rater and of all raters together: % agreement, α and AC1, with 95% intervals |
 | `figures/figure2_inter_rater_pairs.svg`, `.png` | α of each pair of raters, with their % agreement. Three raters or more |
 | `figures/figure3_inter_rater_group.svg`, `.png` | Inter-rater reliability of each pair and of all raters together, with 95% intervals |
 | `readings.csv` | One row per bone per reading: rater code, subject, reading number, position in the rater's list, bone, verdict, whether the reading rejected the subject as a whole (`subject_rejected`), times and comment |
@@ -1025,6 +1025,8 @@ provisional.
 **The measures.** An *item* is a bone of a study subject, accepted or rejected. A reading that
 rejects the subject as a whole rejects each of its bones. Intra-rater reliability compares a
 rater's readings of an item; inter-rater reliability compares the raters' first readings of it.
+Both are measured for each rater, or each pair of raters, and for all raters together, which the
+report shows first. The report explains each measure in plain words.
 
 - **% agreement**: per item, the share of pairs of verdicts that agree, averaged over the items
   (Gwet's p<sub>a</sub>). With two readings, the share of items given the same verdict twice.

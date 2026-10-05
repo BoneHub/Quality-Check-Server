@@ -599,12 +599,31 @@ class ResultsTests(StudyTestCase):
         rows = list(csv.DictReader(io.StringIO(self.results().read("results.csv").decode("utf-8"))))
         kinds = [row["comparison"] for row in rows]
         self.assertEqual(kinds.count("intra-rater"), 4)
+        self.assertEqual(kinds.count("intra-rater group"), 1)
         self.assertEqual(kinds.count("inter-rater pair"), 6)
         self.assertEqual(kinds.count("inter-rater group"), 1)
         code = self.study.study().rater("yvaine_p").code
         always_accepts = next(row for row in rows if row["comparison"] == "intra-rater" and row["raters"] == code)
         self.assertEqual(always_accepts["agreement_percent"], "100.0000")
         self.assertEqual(always_accepts["alpha"], "", "undefined: every verdict was the same")
+
+    def test_intra_rater_for_all_raters_pools_every_raters_items(self):
+        rows = list(csv.DictReader(io.StringIO(self.results().read("results.csv").decode("utf-8"))))
+        each = [row for row in rows if row["comparison"] == "intra-rater"]
+        group = next(row for row in rows if row["comparison"] == "intra-rater group")
+        self.assertEqual(int(group["items"]), sum(int(row["items"]) for row in each))
+        # Every rater judged the same items, so the pooled % agreement is the raters' mean.
+        mean = sum(float(row["agreement_percent"]) for row in each) / len(each)
+        self.assertAlmostEqual(float(group["agreement_percent"]), mean, places=3)
+        self.assertNotEqual(group["ac1_low"], "", "the pooled numbers have intervals too")
+
+    def test_both_sections_open_with_all_raters_together(self):
+        report = self.client.get("/admin/api/study/report", headers=self.admin).text
+        intra, inter = report.split("<h2>Intra-rater reliability</h2>")[1].split("<h2>Inter-rater reliability</h2>")
+        for section in (intra, inter):
+            self.assertIn("All raters together:", section)
+            self.assertIn('class="tiles"', section)
+            self.assertIn("<td>All raters</td>", section)
 
     def test_the_same_readings_give_the_same_numbers(self):
         first = self.results().read("results.csv")

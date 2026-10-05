@@ -2,7 +2,8 @@
 
 * **Items** are the bones of the study's subjects, each judged accept or reject. A reading that
   rejects the subject as a whole rejects each of its bones.
-* **Intra-rater**: each rater's readings of an item, compared with each other.
+* **Intra-rater**: each rater's readings of an item, compared with each other, for each rater
+  and for all of them together (every rater's items side by side).
 * **Inter-rater**: the raters' first readings of an item, for each pair of raters and for all
   of them together. Later readings are the rater's second look, so they are left out here.
 
@@ -77,6 +78,7 @@ class Results:
     readings: list[Reading]
     progress: list[Progress]
     intra: list[tuple[str, Agreement]] = field(default_factory=list)
+    intra_group: Agreement | None = None
     pairs: list[tuple[str, str, Agreement]] = field(default_factory=list)
     group: Agreement | None = None
 
@@ -90,7 +92,8 @@ def _code_order(code: str) -> tuple[int, str]:
 
 
 def compute_results(study: Study, readings: list[Reading]) -> Results:
-    """% agreement, alpha and AC1 for each rater (intra), each pair and all raters (inter)."""
+    """% agreement, alpha and AC1 for each rater and all raters (intra), and for each pair and
+    all raters (inter)."""
     raters = sorted(study.raters, key=lambda rater: _code_order(rater.code))
     codes = [rater.code for rater in raters]
     done: dict[str, int] = {}
@@ -122,19 +125,25 @@ def compute_results(study: Study, readings: list[Reading]) -> Results:
     settings = study.settings
     analyses = 0
 
-    def measure(sources: list[tuple[str, int]]) -> Agreement:
+    def measure(table: np.ndarray, subjects: np.ndarray = subject_of_unit) -> Agreement:
         nonlocal analyses
         analyses += 1
         rng = np.random.default_rng([settings.seed, analyses])
-        return agreement(counts(sources), subject_of_unit, settings.bootstrap_samples, rng)
+        return agreement(table, subjects, settings.bootstrap_samples, rng)
 
+    repeats: dict[str, np.ndarray] = {}
     if settings.readings_per_rater >= 2:
         for code in codes:
-            results.intra.append((code, measure([(code, n) for n in range(1, settings.readings_per_rater + 1)])))
+            repeats[code] = counts([(code, n) for n in range(1, settings.readings_per_rater + 1)])
+            results.intra.append((code, measure(repeats[code])))
     for first, second in ((a, b) for i, a in enumerate(codes) for b in codes[i + 1 :]):
-        results.pairs.append((first, second, measure([(first, 1), (second, 1)])))
+        results.pairs.append((first, second, measure(counts([(first, 1), (second, 1)]))))
     if len(codes) >= 2:
-        results.group = measure([(code, 1) for code in codes])
+        results.group = measure(counts([(code, 1) for code in codes]))
+    if repeats and len(codes) >= 2:
+        # Every rater's items one after another, each with its subject, so that a resample draws
+        # a subject with every rater's readings of it.
+        results.intra_group = measure(np.vstack([repeats[code] for code in codes]), np.tile(subject_of_unit, len(codes)))
     return results
 
 
@@ -223,6 +232,8 @@ def results_csv(results: Results) -> str:
         ]
     )  # fmt: skip
     rows = [("intra-rater", code, found) for code, found in results.intra]
+    if results.intra_group is not None:
+        rows.append(("intra-rater group", ",".join(results.codes), results.intra_group))
     rows += [("inter-rater pair", f"{a}-{b}", found) for a, b, found in results.pairs]
     if results.group is not None:
         rows.append(("inter-rater group", ",".join(results.codes), results.group))
@@ -269,6 +280,14 @@ def _inter_measured(results: Results) -> bool:
     return results.group is not None and results.group.items > 0
 
 
+def _intra_rows(results: Results) -> list[tuple[str, Agreement]]:
+    """Each rater, then all raters together, if there are two raters or more."""
+    rows = [(f"Rater {code}", found) for code, found in results.intra]
+    if results.intra_group is not None:
+        rows.append(("All raters", results.intra_group))
+    return rows
+
+
 def draw_figures(results: Results) -> dict[str, tuple[bytes, bytes]]:
     """The figures the readings allow: intra-rater (two readings or more), the pair grid (three
     raters or more), and inter-rater by pair and for the group (two raters or more) -- each
@@ -278,8 +297,8 @@ def draw_figures(results: Results) -> dict[str, tuple[bytes, bytes]]:
     figures: dict[str, tuple[bytes, bytes]] = {}
     with _figure_lock, matplotlib.rc_context(_STYLE):
         if _intra_measured(results):
-            rows = [(f"Rater {code}", found) for code, found in results.intra]
-            figures[FIGURE_NAMES["intra"]] = _render(_dot_panels(rows))
+            rows = _intra_rows(results)
+            figures[FIGURE_NAMES["intra"]] = _render(_dot_panels(rows, summary_last=results.intra_group is not None))
         if len(results.codes) >= 3 and _inter_measured(results):
             figures[FIGURE_NAMES["pairs"]] = _render(_pair_grid(results))
         if _inter_measured(results):
@@ -552,10 +571,24 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
         "<h2>Intra-rater reliability</h2>",
     ]
     if results.intra and _intra_measured(results):
+        intro = "<p>Does each rater agree with themselves? Each rater's readings of the same bone, compared."
+        if results.intra_group is not None:
+            parts += [f"{intro} All raters together:</p>", _tiles(results.intra_group)]
+        else:
+            parts.append(f"{intro}</p>")
         parts += [
-            "<p>Does each rater agree with themselves? Each rater's readings of the same bone, compared.</p>",
-            _figure(figures, "intra", 1, "Intra-rater reliability per rater: estimate (dot) and 95% interval (line)."),
-            _agreement_table([(f"Rater {code}", found) for code, found in results.intra], "Rater"),
+            _figure(
+                figures,
+                "intra",
+                1,
+                (
+                    "Intra-rater reliability for each rater and for all raters together: estimate (dot) and 95% "
+                    "interval (line)."
+                    if results.intra_group is not None
+                    else "Intra-rater reliability of the rater: estimate (dot) and 95% interval (line)."
+                ),
+            ),
+            _agreement_table(_intra_rows(results), "Raters"),
         ]
     elif results.intra:
         parts.append("<p>Nothing to compare yet: no rater has read a subject twice.</p>")
@@ -586,10 +619,10 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
                 "group",
                 3,
                 (
-                    "Inter-rater reliability for each pair of raters and for all raters together: estimate and 95% "
-                    "interval."
+                    "Inter-rater reliability for each pair of raters and for all raters together: estimate (dot) and "
+                    "95% interval (line)."
                     if len(results.codes) >= 3
-                    else "Inter-rater reliability of the two raters: estimate and 95% interval."
+                    else "Inter-rater reliability of the two raters: estimate (dot) and 95% interval (line)."
                 ),
             ),
             _agreement_table(
@@ -613,13 +646,15 @@ _METHOD = """
 reading. Rejecting a whole subject counts as rejecting each of its bones. The <i>Items</i> in the tables are
 these bones.</li>
 <li><b>Intra-rater: does a rater agree with themselves?</b> Each rater read the same subjects more than once,
-with other subjects in between. Their readings of each bone are compared. One result per rater.</li>
+with other subjects in between. Their readings of each bone are compared, for each rater, which shows who is
+less consistent, and for all raters together, which gives one result for the whole team.</li>
 <li><b>Inter-rater: do the raters agree with each other?</b> Their first readings of each bone are compared,
 for each pair of raters, which shows who disagrees with whom, and for all raters together, which gives one
 result for the whole team. Later readings are left out here: they are the same rater looking again.</li>
-<li><b>% agreement: how often the verdicts match.</b> For two raters, or one rater's two readings, the share
-of bones given the same verdict. For all raters together: for each bone, the share of pairs of raters who gave
-it the same verdict, averaged over the bones.</li>
+<li><b>% agreement: how often the verdicts match.</b> For one rater's two readings, or two raters, the share
+of bones given the same verdict. Intra-rater for all raters together: the same, over every rater's bones.
+Inter-rater for all raters together: for each bone, the share of pairs of raters who gave it the same verdict,
+averaged over the bones.</li>
 <li><b>Gwet's AC1: agreement with the part due to luck taken out.</b> 1 is perfect agreement, 0 is no better
 than luck; as a rough guide, above 0.8 is good. When most bones are accepted, raters agree on many of them
 even without looking closely, so % agreement looks better than it really is. AC1 removes that luck and stays
