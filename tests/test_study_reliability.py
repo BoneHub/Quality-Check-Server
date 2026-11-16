@@ -90,45 +90,45 @@ class TwoCoderTests(unittest.TestCase):
 
 
 class IntervalTests(unittest.TestCase):
-    """The 95% intervals, from resampling whole subjects."""
+    """The 95% intervals, from resampling whole scans."""
 
-    def data(self, n_subjects=40, items=6, flip=0.1, seed=3):
+    def data(self, n_scans=40, items=6, flip=0.1, seed=3):
         """Two coders who each get an item's true verdict wrong with probability ``flip``."""
         rng = np.random.default_rng(seed)
-        truth = rng.random((n_subjects, items)) < 0.2
+        truth = rng.random((n_scans, items)) < 0.2
         coded = [truth ^ (rng.random(truth.shape) < flip) for _ in range(2)]
-        units = [(int(coded[0][s, i]), int(coded[1][s, i])) for s in range(n_subjects) for i in range(items)]
-        subjects = np.repeat(np.arange(n_subjects), items)
-        return counts_of(units, [0, 1]), subjects
+        units = [(int(coded[0][s, i]), int(coded[1][s, i])) for s in range(n_scans) for i in range(items)]
+        scans = np.repeat(np.arange(n_scans), items)
+        return counts_of(units, [0, 1]), scans
 
     def test_the_interval_surrounds_the_estimate(self):
-        counts, subjects = self.data()
-        result = reliability.agreement(counts, subjects, 1000, np.random.default_rng(1))
+        counts, scans = self.data()
+        result = reliability.agreement(counts, scans, 1000, np.random.default_rng(1))
         for estimate in (result.agreement, result.alpha, result.ac1):
             self.assertLessEqual(estimate.low, estimate.value)
             self.assertGreaterEqual(estimate.high, estimate.value)
             self.assertLess(estimate.low, estimate.high)
 
     def test_the_same_seed_gives_the_same_interval(self):
-        counts, subjects = self.data()
-        first = reliability.agreement(counts, subjects, 500, np.random.default_rng(7))
-        second = reliability.agreement(counts, subjects, 500, np.random.default_rng(7))
+        counts, scans = self.data()
+        first = reliability.agreement(counts, scans, 500, np.random.default_rng(7))
+        second = reliability.agreement(counts, scans, 500, np.random.default_rng(7))
         self.assertEqual(first, second)
 
     def test_more_subjects_give_a_narrower_interval(self):
-        few = reliability.agreement(*self.data(n_subjects=15), 1000, np.random.default_rng(1))
-        many = reliability.agreement(*self.data(n_subjects=150), 1000, np.random.default_rng(1))
+        few = reliability.agreement(*self.data(n_scans=15), 1000, np.random.default_rng(1))
+        many = reliability.agreement(*self.data(n_scans=150), 1000, np.random.default_rng(1))
         self.assertLess(many.alpha.high - many.alpha.low, few.alpha.high - few.alpha.low)
 
     def test_the_counts_say_how_much_was_compared(self):
-        counts, subjects = self.data(n_subjects=10, items=6)
-        result = reliability.agreement(counts, subjects, 200, np.random.default_rng(1))
-        self.assertEqual((result.subjects, result.items, result.values), (10, 60, 120))
+        counts, scans = self.data(n_scans=10, items=6)
+        result = reliability.agreement(counts, scans, 200, np.random.default_rng(1))
+        self.assertEqual((result.scans, result.items, result.values), (10, 60, 120))
         self.assertAlmostEqual(sum(result.shares), 1.0)
 
     def test_one_subject_has_no_interval(self):
-        counts, subjects = self.data(n_subjects=1)
-        result = reliability.agreement(counts, subjects, 200, np.random.default_rng(1))
+        counts, scans = self.data(n_scans=1)
+        result = reliability.agreement(counts, scans, 200, np.random.default_rng(1))
         self.assertIsNotNone(result.agreement.value)
         self.assertIsNone(result.agreement.low)
 

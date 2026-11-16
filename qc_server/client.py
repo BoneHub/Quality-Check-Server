@@ -5,7 +5,7 @@ file is shipped inside the 3D Slicer extension, where pip-installing into Slicer
 Python is fragile. Keep it dependency-free.
 
     client = BoneHubQCClient("http://localhost:8000", "bhqc_...")
-    handout = client.next_subject()
+    handout = client.next_scan()
     client.download_image(handout["assignment_id"], Path("image.nii.gz"))
     client.download_segmentation(handout["assignment_id"], Path("segmentation.seg.nrrd"))
     client.submit(handout["assignment_id"], quality_check_confirmed=True,
@@ -20,11 +20,11 @@ An editor uploads the corrected segmentation, as above; a reviewer judges the se
 as it is, label by label::
 
     reviewer = BoneHubQCClient("http://localhost:8000", "bhqc_...", role="reviewer")
-    handout = reviewer.next_subject()
+    handout = reviewer.next_scan()
     reviewer.submit(handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True,
                     confirmed_labels=["FEMUR_LEFT"], rejected_labels=["FEMUR_RIGHT"])
 
-Verdicts wait on the server until its administrator approves the subject into the dataset.
+Verdicts wait on the server until its administrator approves the scan into the dataset.
 """
 
 from __future__ import annotations
@@ -73,12 +73,13 @@ class BoneHubQCClient:
         return self._request("GET", "/api/v1/ping")
 
     def labels(self) -> dict:
-        """The BoneHub label map and label statuses: ``{'label_name_to_value': {...}, ...}``."""
+        """The BoneHub label map, and what label origins and review states mean:
+        ``{'label_name_to_value': {...}, 'label_origins': {...}, 'review_states': {...}, ...}``."""
         return self._request("GET", "/api/v1/labels")
 
-    def next_subject(self) -> dict:
-        """Lease the next subject. Raises with status 404 when the queue is empty."""
-        return self._request("POST", "/api/v1/subjects/next")
+    def next_scan(self) -> dict:
+        """Lease the next scan. Raises with status 404 when the queue is empty."""
+        return self._request("POST", "/api/v1/scans/next")
 
     def my_assignments(self) -> list:
         return self._request("GET", "/api/v1/assignments")
@@ -110,13 +111,13 @@ class BoneHubQCClient:
         rejected_labels: list[str] | None = None,
         missing_labels: list[str] | None = None,
     ) -> dict:
-        """Send the verdict back. The server keeps it until its administrator approves the subject.
+        """Send the verdict back. The server keeps it until its administrator approves the scan.
 
         An editor's confirmed submission carries the corrected segmentation. A reviewer's
         judges the segmentation as it is (``use_stored_segmentation``), with labels accepted
         (``confirmed_labels``), rejected (``rejected_labels``; an editor corrects each one or
         takes it out) and reported missing (``missing_labels``). ``quality_check_confirmed=False``
-        rejects the subject as a whole, and needs no file.
+        rejects the scan as a whole, and needs no file.
         """
         if quality_check_confirmed and segmentation_path is None and not use_stored_segmentation:
             raise QCClientError(

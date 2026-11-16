@@ -1,7 +1,7 @@
 # Run the quality-check server against a BoneHub dataset folder, on a disk of this computer
 # or on an SMB share.
 #
-#   1. copy .env.example to .env and say where the dataset is: BONEHUB_DATASET_PATH for a
+#   1. copy .env.example to .env and say where the database is: BONEHUB_DATASET_PATH for a
 #      folder on this computer, or BONEHUB_DATASET_SHARE and its credentials for a share
 #   2. docker compose up -d --build
 #   3. docker compose logs | grep -A2 "admin key"   # a new server prints its admin key once
@@ -32,13 +32,13 @@ services:
     ports:
       - "${BONEHUB_QC_PORT:-8000}:8000"
     volumes:
-      # The dataset: the folder in BONEHUB_DATASET_PATH when that is filled in, the share of
+      # The database: the folder in BONEHUB_DATASET_PATH when that is filled in, the share of
       # the dataset volume below when it is blank. (Compose bind-mounts a path and mounts a
       # bare name as a volume.)
       # Mounted read-write: the server keeps its non-secret state -- the verdicts and the
       # corrected segmentations waiting for approval among it -- in .bonehub_qc/<server id>/,
-      # and writes what the administrator approves into the segmentations, Subject_info
-      # files and quality-check logs of the dataset. A reliability study server
+      # and writes what the administrator approves into the segmentations, scan.json files
+      # and quality-check logs (logs/) of the database. A reliability study server
       # (BONEHUB_QC_MODE=study) writes nothing there: BONEHUB_DATASET_ACCESS=ro in its env
       # file mounts the dataset read-only.
       - "${BONEHUB_DATASET_PATH:-dataset}:/data:${BONEHUB_DATASET_ACCESS:-rw}"
@@ -50,7 +50,7 @@ services:
     environment:
       BONEHUB_QC_DATASET_ROOT: /data
       BONEHUB_QC_CREDENTIALS_DIR: /var/lib/bonehub-qc
-      # The time zone of server.log and the Dataset_XXX_qualitycheck.log files. A container
+      # The time zone of server.log and the logs/ds-NNNN_qualitycheck.log files. A container
       # does not follow the host's zone, so it is named here; blank is UTC.
       TZ: "${BONEHUB_QC_TIMEZONE:-UTC}"
       # Leave these blank to have the server generate them on first start and keep them
@@ -68,16 +68,17 @@ services:
       # blank leaves the setting to the admin panel, starting from the server's default.
       # Blank means every dataset under the root; "none" resets a previously saved value.
       BONEHUB_QC_ALLOWED_DATASET_IDS: "${BONEHUB_QC_ALLOWED_DATASET_IDS:-}"
-      # Label statuses that queue a subject: 1 = not reviewed yet (2 = already reviewed).
-      BONEHUB_QC_ELIGIBLE_LABEL_VALUES: "${BONEHUB_QC_ELIGIBLE_LABEL_VALUES:-}"
+      # Which labels queue a scan: not_reviewed (the default), reviewed (a second review), or both;
+      # and of which origins in scan.json: source, manual, model, derived, model:<name>; blank is any.
+      BONEHUB_QC_ELIGIBLE_REVIEW_STATES: "${BONEHUB_QC_ELIGIBLE_REVIEW_STATES:-}"
+      BONEHUB_QC_ELIGIBLE_ORIGINS: "${BONEHUB_QC_ELIGIBLE_ORIGINS:-}"
       BONEHUB_QC_LEASE_TTL_SECONDS: "${BONEHUB_QC_LEASE_TTL_SECONDS:-}"
-      # "sequential" hands out the lowest free subject, "random" a free subject at random.
+      # "sequential" hands out the lowest free scan, "random" a free scan at random.
       BONEHUB_QC_ASSIGNMENT_STRATEGY: "${BONEHUB_QC_ASSIGNMENT_STRATEGY:-}"
       # Whether an editor's corrections go back to a reviewer.
       BONEHUB_QC_EDITS_NEED_REVIEW: "${BONEHUB_QC_EDITS_NEED_REVIEW:-}"
-      # Also queue subjects with an image but no segmentation, for editors.
-      BONEHUB_QC_INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION: "${BONEHUB_QC_INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION:-}"
-      BONEHUB_QC_MARK_REMOVED_LABELS_ABSENT: "${BONEHUB_QC_MARK_REMOVED_LABELS_ABSENT:-}"
+      # Also queue scans with an image but no segmentation, for editors.
+      BONEHUB_QC_INCLUDE_SCANS_WITHOUT_SEGMENTATION: "${BONEHUB_QC_INCLUDE_SCANS_WITHOUT_SEGMENTATION:-}"
       BONEHUB_QC_REQUIRE_GEOMETRY_MATCH: "${BONEHUB_QC_REQUIRE_GEOMETRY_MATCH:-}"
       BONEHUB_QC_KEEP_SEGMENTATION_BACKUPS: "${BONEHUB_QC_KEEP_SEGMENTATION_BACKUPS:-}"
     restart: unless-stopped

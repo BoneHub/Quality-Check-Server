@@ -1,4 +1,4 @@
-"""The quality-check store: subject index, users, assignments, cases and dataset writes.
+"""The quality-check store: scan index, users, assignments, cases and dataset writes.
 
 The server keeps its credentials apart from everything else. The credentials folder is
 inside the container, never on the dataset share::
@@ -11,30 +11,38 @@ inside the container, never on the dataset share::
                               BONEHUB_QC_USERS can define users and their keys
 
 Everything else is on the share, in a folder of this server's own, so that several
-servers -- each with its own admin -- can work on one dataset without overwriting each
-other's state::
+servers -- each with its own admin -- can work on one database without overwriting each
+other's state. The BoneHub format leaves ``.bonehub_qc`` out of what is published::
 
     <dataset_root>/.bonehub_qc/<server_id>/
     |-- session.json          which server this is, when it was created and last started
     |-- config.json           policy, see config.QCServerConfig
-    |-- assignments.json      which subject is with whom, and how it ended
-    |-- cases.json            the subjects in progress, with every verdict so far (see workflow)
-    |-- cases_done.jsonl      the subjects approved or closed, a line each
-    |-- staged/               editors' corrected segmentations, waiting for approval
+    |-- assignments.json      which scan is with whom, and how it ended
+    |-- cases.json            the scans in progress, with every verdict so far (see workflow)
+    |-- cases_done.jsonl      the scans approved or closed, a line each
+    |-- staged/               editors' corrected segmentations, waiting for approval,
+    |                         by scan: ds-NNNN/sub-NNNNNN/scan-NN/segmentation.seg.nrrd
     |-- submissions.jsonl     append-only audit trail
     |-- server.log
-    |-- backups/              the dataset's segmentations, kept before an approval overwrote them
+    |-- backups/              the scans' segmentations, kept before an approval overwrote them
     `-- tmp/                  uploads being validated
 
 The verdicts of reviewers and editors go into this folder only. Nothing in the dataset
-changes until the administrator approves a subject (:meth:`QCStore.approve`): only then are
-its accepted labels set to reviewed in ``Subject_info``, and a corrected segmentation moved in.
+changes until the administrator approves a scan (:meth:`QCStore.approve`): only then is a
+corrected segmentation moved in, and the origins of its labels written into the scan's
+``scan.json`` -- ``manual`` for those an editor drew.
 
-A subject that another server has leased, or has in progress, is not handed out here, so two
-servers never work on the same subject at the same time.
+The BoneHub format does not record whether a label was reviewed, so the servers do: the
+approved cases in every server's ``cases_done.jsonl`` say which labels each approval left
+reviewed, and with which segmentation. A label is reviewed while the scan's segmentation is
+still that one (see :meth:`QCStore.reviewed_labels`), whichever server approved it.
 
-Only datasets written under this server's ``bonehub_data_schema`` version are served: in
-another version the label values, label statuses and segmentation format may differ.
+A scan that another server has leased, or has in progress, is not handed out here, so two
+servers never work on the same scan at the same time.
+
+Only datasets written in this server's major version of the BoneHub format are served: in
+another, the layout, scan.json and segmentation format may differ. A state folder kept for
+an earlier version of the format is refused, rather than its cases read as if about this one.
 
 A re-entrant lock serialises the server's state; run the server with one worker. The writes
 into the dataset have a lock of their own, taken before the first when both are needed, so
@@ -58,22 +66,23 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
-from bonehub_data_schema import (
+from bonehub_format import (
+    SCHEMA_VERSION,
     SEGMENTATION_SUFFIX,
     BoneLabelMap,
     DatasetInfo,
+    ScanInfo,
     SubjectInfo,
-    __version__ as SCHEMA_VERSION,
     is_compatible_schema_version,
+    layout,
 )
-from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
 
 from . import __version__ as SERVER_VERSION
 from . import auth, workflow
 from .audit import AuditLog, utc_now_iso
-from .config import CONFIG_FILE_NAME, DEFAULT_STATE_DIR_NAME, QCServerConfig
+from .config import CONFIG_FILE_NAME, DEFAULT_STATE_DIR_NAME, EDITED_ORIGIN, QCServerConfig
 from .models import (
     DATA_ACCESS_DESCRIPTIONS,
     DEFAULT_DATA_ACCESS,
@@ -116,7 +125,7 @@ LABEL_NAME_TO_VALUE: dict[str, int] = {label.name: label.value for label in Bone
 #: How much of a file is read at a time to fingerprint it.
 _HASH_CHUNK_BYTES = 2 * 1024 * 1024
 
-#: The longest remark an approval adds to a subject's Subject_info, its tag included.
+#: The longest remark an approval adds to a scan's remarks in scan.json, its tag included.
 MAX_REMARK_LENGTH = 500
 
 #: What each stage waits for, in messages.
@@ -125,7 +134,7 @@ _STAGE_WAITS_FOR = {
     workflow.EDIT: "an editor",
     workflow.APPROVAL: "the administrator's approval",
     workflow.ESCALATED: "the administrator",
-    workflow.REJECTED_SUBJECT: "the administrator, as a reviewer rejected the subject",
+    workflow.REJECTED_SCAN: "the administrator, as a reviewer rejected the scan",
     workflow.APPLIED: "nothing: it is approved and in the dataset",
     workflow.CLOSED: "nothing: the administrator closed it",
 }
@@ -141,23 +150,43 @@ class QCError(Exception):
 
 
 @dataclass
-class SubjectRef:
-    """One indexed subject that is a candidate for quality check."""
+class ScanRef:
+    """One indexed scan that is a candidate for quality check."""
 
-    dataset_id: int
-    subject_id: int
-    subject_key: str
+    scan_key: str
     has_image: bool
     has_segmentation: bool
-    segmentation_labels: dict[str, int] = field(default_factory=dict)
 
     @property
-    def sort_key(self) -> tuple[int, int]:
-        return (self.dataset_id, self.subject_id)
+    def ids(self) -> tuple[int, int, int]:
+        """The scan's dataset, subject and scan ids."""
+        return layout.parse_scan_key(self.scan_key)
+
+    @property
+    def dataset_id(self) -> int:
+        return self.ids[0]
+
+    @property
+    def sort_key(self) -> tuple[int, int, int]:
+        return self.ids
 
 
-def subject_key_of(dataset_id: int, subject_id: int) -> str:
-    return f"{str(dataset_id).zfill(DATASET_ZFILL)}_{str(subject_id).zfill(SUBJECT_ZFILL)}"
+@dataclass
+class Approval:
+    """What the latest approval of a scan on any server of the database left reviewed."""
+
+    applied_at: str
+    result: FileFingerprint | None
+    reviewed: frozenset[str]
+
+
+def scan_ids(scan_key: str) -> tuple[int, int, int]:
+    """``(dataset_id, subject_id, scan_id)`` of a scan key such as 'ds-0027/sub-000001/scan-01'.
+    Raises :class:`QCError` for anything that is not one."""
+    try:
+        return layout.parse_scan_key(scan_key)
+    except (TypeError, ValueError) as exc:
+        raise QCError(f"'{scan_key}' is not a scan, such as ds-0027/sub-000001/scan-01.", status_code=404) from exc
 
 
 class QCStore:
@@ -187,6 +216,7 @@ class QCStore:
         auth.ensure_credentials_dir(self.credentials_dir)
         self.server_id, self.server_created = auth.load_or_create_server_id(self.credentials_dir)
         self.state_dir = self.state_root / self.server_id
+        _check_state_format(self.state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         for name in (BACKUP_DIR_NAME, STAGED_DIR_NAME, TMP_DIR_NAME):
             (self.state_dir / name).mkdir(exist_ok=True)
@@ -209,52 +239,59 @@ class QCStore:
         self._users_stamp = self._users_file_stamp()
         self._assignments: dict[str, Assignment] = self._load_assignments()
         self._cases: dict[str, Case] = self._load_cases()
-        #: Subjects whose approval is being written into the dataset right now.
+        #: Scans whose approval is being written into the dataset right now.
         self._applying: set[str] = set()
 
         self._record_session()
         self._define_users_from_env()
 
-        self._index: list[SubjectRef] = []
-        self._index_by_key: dict[str, SubjectRef] = {}
+        self._index: list[ScanRef] = []
+        self._index_by_key: dict[str, ScanRef] = {}
         self._dataset_info: dict[int, dict] = {}
         self._index_built_at: datetime | None = None
-        self._total_subjects = 0
+        self._total_scans = 0
+        #: The other servers' finished cases, by file, as last read: (size, mtime) and what they approved.
+        self._approvals_read: dict[Path, tuple[tuple[int, int], dict[str, Approval]]] = {}
+        #: Whether a segmentation is still the one an approval left, by (path, size, mtime, digest).
+        self._still_approved: dict[tuple[str, int, int, str], bool] = {}
         self.refresh_index()
 
     # ------------------------------------------------------------------ paths
     def dataset_path(self, dataset_id: int) -> Path:
-        return self.dataset_root / f"Dataset_{str(dataset_id).zfill(DATASET_ZFILL)}"
-
-    def subject_info_path(self, dataset_id: int) -> Path:
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        return self.dataset_path(dataset_id) / f"Subject_info_{padded}.json"
+        return layout.dataset_path(self.dataset_root, dataset_id)
 
     def dataset_info_path(self, dataset_id: int) -> Path:
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        return self.dataset_path(dataset_id) / f"Dataset_info_{padded}.json"
+        return self.dataset_path(dataset_id) / layout.DATASET_JSON
 
-    def image_path(self, dataset_id: int, subject_id: int) -> Path:
-        return self.dataset_path(dataset_id) / "Image" / f"{subject_key_of(dataset_id, subject_id)}.nii.gz"
+    def scan_path(self, scan_key: str) -> Path:
+        """The scan's folder in the database."""
+        return layout.scan_path(self.dataset_root, *scan_ids(scan_key))
 
-    def segmentation_path(self, dataset_id: int, subject_id: int) -> Path:
-        """Where the segmentation belongs in the dataset, whether or not it exists yet."""
-        key = subject_key_of(dataset_id, subject_id)
-        return self.dataset_path(dataset_id) / "Segmentation" / f"{key}{SEGMENTATION_SUFFIX}"
+    def scan_info_path(self, scan_key: str) -> Path:
+        return self.scan_path(scan_key) / layout.SCAN_JSON
 
-    def staged_path(self, dataset_id: int, subject_id: int) -> Path:
-        """Where an editor's corrected segmentation of the subject waits for approval."""
-        key = subject_key_of(dataset_id, subject_id)
-        folder = self.state_dir / STAGED_DIR_NAME / f"Dataset_{str(dataset_id).zfill(DATASET_ZFILL)}"
-        return folder / f"{key}{SEGMENTATION_SUFFIX}"
+    def subject_info_path(self, scan_key: str) -> Path:
+        """The subject.json of the person the scan is of."""
+        return self.scan_path(scan_key).parent / layout.SUBJECT_JSON
 
-    def current_segmentation_path(self, dataset_id: int, subject_id: int) -> Path | None:
+    def image_path(self, scan_key: str) -> Path:
+        return self.scan_path(scan_key) / layout.IMAGE_FILE
+
+    def segmentation_path(self, scan_key: str) -> Path:
+        """Where the scan's segmentation belongs, whether or not it exists yet."""
+        return self.scan_path(scan_key) / layout.SEGMENTATION_FILE
+
+    def staged_path(self, scan_key: str) -> Path:
+        """Where an editor's corrected segmentation of the scan waits for approval."""
+        return self.state_dir / STAGED_DIR_NAME / layout.scan_key(*scan_ids(scan_key)) / layout.SEGMENTATION_FILE
+
+    def current_segmentation_path(self, scan_key: str) -> Path | None:
         """The segmentation under quality check: an editor's correction waiting for approval,
-        else the dataset's own. None when there is neither."""
+        else the scan's own. None when there is neither."""
         with self._lock:
-            case = self._cases.get(subject_key_of(dataset_id, subject_id))
+            case = self._cases.get(scan_key)
             staged = case is not None and case.staged
-        path = self.staged_path(dataset_id, subject_id) if staged else self.segmentation_path(dataset_id, subject_id)
+        path = self.staged_path(scan_key) if staged else self.segmentation_path(scan_key)
         return path if path.exists() else None
 
     # --------------------------------------------------------------- sessions
@@ -285,7 +322,7 @@ class QCStore:
         self._record_session(started=True)
 
     def sessions(self) -> list[dict]:
-        """Every server that has kept state in this dataset, this one included, oldest first."""
+        """Every server that has kept state in this database, this one included, oldest first."""
         found = []
         for path in sorted(self.state_root.glob(f"*/{SESSION_FILE_NAME}")):
             session = _read_json(path)
@@ -294,9 +331,9 @@ class QCStore:
         return sorted(found, key=lambda session: str(session.get("created_at", "")))
 
     def _claimed_by_other_sessions(self) -> set[str]:
-        """Subjects another server on this dataset has out right now, or has in progress.
+        """Scans another server on this database has out right now, or has in progress.
 
-        A subject in progress there carries verdicts that wait for that server's
+        A scan in progress there carries verdicts that wait for that server's
         administrator, and are not in the dataset yet, so it must not be reviewed here too.
         """
         now = datetime.now(timezone.utc)
@@ -309,8 +346,8 @@ class QCStore:
                 if not isinstance(entry, dict) or entry.get("state") != "assigned":
                     continue
                 try:
-                    if _parse_iso(str(entry.get("expires_at"))) > now:
-                        claimed.add(str(entry.get("subject_key")))
+                    if isinstance(entry.get("scan_key"), str) and _parse_iso(str(entry.get("expires_at"))) > now:
+                        claimed.add(entry["scan_key"])
                 except ValueError:
                     continue
         for path in self.state_root.glob(f"*/{CASES_FILE_NAME}"):
@@ -319,76 +356,87 @@ class QCStore:
             entries = _read_json(path)
             for entry in entries if isinstance(entries, list) else []:
                 if isinstance(entry, dict) and entry.get("stage") in workflow.OPEN_STAGES:
-                    claimed.add(str(entry.get("subject_key")))
+                    if isinstance(entry.get("scan_key"), str):
+                        claimed.add(entry["scan_key"])
         return claimed
 
     # ------------------------------------------------------------------ index
     def refresh_index(self) -> None:
-        """Rebuild the list of subjects eligible for quality check from disk."""
-        index: list[SubjectRef] = []
+        """Rebuild the list of scans eligible for quality check from disk.
+
+        Reads the dataset.json of each dataset folder (``ds-NNNN``) and the scan.json of each of
+        its scans. A dataset written in another major version of the format is skipped, and so is
+        a scan whose scan.json cannot be read; an eligible scan without an image, or whose
+        subject has no subject.json -- a subject the converter has not finished -- is not handed out.
+        """
+        index: list[ScanRef] = []
         dataset_info: dict[int, dict] = {}
         total = 0
+        approvals = self.approvals()
 
-        for dataset_dir in sorted(self.dataset_root.glob("Dataset_*")):
+        for dataset_dir in sorted(self.dataset_root.glob("ds-*")):
             if not dataset_dir.is_dir():
                 continue
-            try:
-                dataset_id = int(dataset_dir.name.split("_")[1])
-            except (IndexError, ValueError):
-                self.audit.event(f"Skipping '{dataset_dir.name}': the folder name carries no dataset id.")
+            dataset_id = layout.parse_dataset_dir(dataset_dir.name)
+            if dataset_id is None:
+                self.audit.event(f"Skipping '{dataset_dir.name}': it is not a dataset folder (ds-NNNN).")
                 continue
             if self.config.allowed_dataset_ids is not None and dataset_id not in self.config.allowed_dataset_ids:
                 continue
-
+            if not (dataset_dir / layout.DATASET_JSON).is_file():
+                self.audit.event(f"Skipping '{dataset_dir.name}': it has no {layout.DATASET_JSON}.")
+                continue
             try:
                 info = self._read_dataset_info(dataset_id)
             except Exception as exc:
-                self.audit.event(f"Skipping '{dataset_dir.name}': its Dataset_info file could not be read: {exc}")
+                self.audit.event(f"Skipping '{dataset_dir.name}': its {layout.DATASET_JSON} could not be read: {exc}")
                 continue
             if not is_compatible_schema_version(info.get("schema_version")):
                 self.audit.event(
-                    f"Skipping '{dataset_dir.name}': it was written with schema version "
-                    f"{info.get('schema_version') or '(not recorded)'}, but this server reads {SCHEMA_VERSION}. "
-                    "Regenerate the dataset with the current converters."
+                    f"Skipping '{dataset_dir.name}': it was written in version "
+                    f"{info.get('schema_version') or '(not recorded)'} of the BoneHub format, but this server reads "
+                    f"{SCHEMA_VERSION}. Convert it again with the current converters."
                 )
                 continue
-
-            subjects = self._read_subject_info(dataset_id, missing_ok=True)
-            if subjects is None:
-                continue
-            total += len(subjects)
             dataset_info[dataset_id] = info
 
-            for subject in subjects:
-                if subject.subject_id is None:
+            for subject_id, scan_id, scan_dir in _scan_folders(dataset_dir):
+                key = layout.scan_key(dataset_id, subject_id, scan_id)
+                try:
+                    scan = ScanInfo.load(scan_dir / layout.SCAN_JSON)
+                except FileNotFoundError:
+                    continue  # a folder that is no scan (yet)
+                except Exception as exc:
+                    self.audit.event(f"Skipping scan {key}: its {layout.SCAN_JSON} could not be read: {exc}")
                     continue
-                if not self._is_eligible(subject):
+                total += 1
+                if not self._is_eligible(key, scan, approvals):
                     continue
-                if not self.image_path(dataset_id, subject.subject_id).exists():
+                if not (scan_dir.parent / layout.SUBJECT_JSON).is_file():
                     self.audit.event(
-                        f"Subject {subject_key_of(dataset_id, subject.subject_id)} is eligible but its image file "
-                        f"is missing; it will not be handed out."
+                        f"Scan {key} is eligible, but its subject has no {layout.SUBJECT_JSON}: the converter has not "
+                        "finished it, so it will not be handed out."
                     )
                     continue
+                if not (scan_dir / layout.IMAGE_FILE).is_file():
+                    self.audit.event(f"Scan {key} is eligible but its image file is missing; it will not be handed out.")
+                    continue
                 index.append(
-                    SubjectRef(
-                        dataset_id=dataset_id,
-                        subject_id=subject.subject_id,
-                        subject_key=subject_key_of(dataset_id, subject.subject_id),
+                    ScanRef(
+                        scan_key=key,
                         has_image=True,
-                        has_segmentation=self.segmentation_path(dataset_id, subject.subject_id).exists(),
-                        segmentation_labels=dict(subject.segmentation or {}),
+                        has_segmentation=(scan_dir / layout.SEGMENTATION_FILE).is_file(),
                     )
                 )
 
         index.sort(key=lambda ref: ref.sort_key)
         with self._lock:
             self._index = index
-            self._index_by_key = {ref.subject_key: ref for ref in index}
+            self._index_by_key = {ref.scan_key: ref for ref in index}
             self._dataset_info = dataset_info
-            self._total_subjects = total
+            self._total_scans = total
             self._index_built_at = datetime.now(timezone.utc)
-        self.audit.event(f"Subject index rebuilt: {len(index)} eligible of {total} subjects.")
+        self.audit.event(f"Scan index rebuilt: {len(index)} eligible of {total} scans.")
 
     def _ensure_fresh_index(self) -> None:
         """Rebuild when the cached index has aged past ``index_refresh_seconds``."""
@@ -401,13 +449,105 @@ class QCStore:
         if datetime.now(timezone.utc) - built_at > timedelta(seconds=ttl):
             self.refresh_index()
 
-    def _is_eligible(self, subject: SubjectInfo) -> bool:
-        if not subject.image:
+    def _is_eligible(self, scan_key: str, scan: ScanInfo, approvals: dict[str, Approval]) -> bool:
+        """Whether a scan is queued: a label of its segmentation is under review (see
+        ``workflow.under_review``), or it has no segmentation and the server queues those."""
+        origins = scan.segmentation or {}
+        if not origins:
+            return self.config.include_scans_without_segmentation
+        states = self.config.eligible_review_states
+        if len(states) == 2:  # reviewed or not, every label of an eligible origin is
+            reviewed: set[str] = set()
+        else:
+            reviewed = self.reviewed_labels(scan_key, approvals)
+        return any(
+            workflow.under_review(origin, name in reviewed, self.config.eligible_origins, states)
+            for name, origin in origins.items()
+        )
+
+    # -------------------------------------------------------------- reviews
+    def approvals(self) -> dict[str, Approval]:
+        """The latest approval of each scan, on this server or any other on the database: what it
+        left reviewed, and the segmentation it left. Another server's finished cases are read from
+        its ``cases_done.jsonl``, again only once the file has changed."""
+        found: dict[str, Approval] = {}
+
+        def keep(key: str, approval: Approval) -> None:
+            known = found.get(key)
+            if known is None or approval.applied_at >= known.applied_at:
+                found[key] = approval
+
+        for path in sorted(self.state_root.glob(f"*/{DONE_CASES_FILE_NAME}")):
+            if path.parent != self.state_dir:
+                for key, approval in self._approvals_in(path).items():
+                    keep(key, approval)
+        with self._lock:
+            own = [case for case in self._cases.values() if case.stage == workflow.APPLIED]
+        for case in own:
+            keep(case.scan_key, Approval(case.applied_at or "", case.result, frozenset(case.reviewed_labels or ())))
+        return found
+
+    def _approvals_in(self, path: Path) -> dict[str, Approval]:
+        """The approvals another server recorded in its done file, as last read while unchanged.
+        A line that is no approved case of this format -- cut short, or about another layout --
+        is passed over."""
+        try:
+            stat = path.stat()
+        except OSError:
+            return {}
+        stamp = (stat.st_size, stat.st_mtime_ns)
+        cached = self._approvals_read.get(path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        approvals: dict[str, Approval] = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                        if not isinstance(entry, dict) or entry.get("stage") != workflow.APPLIED:
+                            continue
+                        key, at, reviewed = entry["scan_key"], entry["applied_at"], entry.get("reviewed_labels") or []
+                        result = FileFingerprint(**entry["result"]) if entry.get("result") else None
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    if not isinstance(key, str) or not isinstance(at, str) or not isinstance(reviewed, list):
+                        continue
+                    known = approvals.get(key)
+                    if known is None or at >= known.applied_at:
+                        approvals[key] = Approval(at, result, frozenset(str(name) for name in reviewed))
+        except OSError:
+            return {}
+        self._approvals_read[path] = (stamp, approvals)
+        return approvals
+
+    def reviewed_labels(self, scan_key: str, approvals: dict[str, Approval] | None = None) -> set[str]:
+        """The labels of a scan that a server on this database has reviewed: those the scan's
+        latest approval, on any server, left reviewed -- as long as the scan's segmentation is
+        still the one that approval left. Converting the dataset again, or any other tool that
+        rewrites the segmentation, so leaves every label of the scan to be reviewed again."""
+        approval = (approvals if approvals is not None else self.approvals()).get(scan_key)
+        if approval is None or not approval.reviewed:
+            return set()
+        if not self._is_still(approval.result, self.segmentation_path(scan_key)):
+            return set()
+        return set(approval.reviewed)
+
+    def _is_still(self, fingerprint: FileFingerprint | None, path: Path) -> bool:
+        """:func:`same_file`, remembering the answer for a file whose time moved, so that the
+        index does not read it again at every rebuild."""
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return fingerprint is None
+        if fingerprint is None or stat.st_size != fingerprint.size:
             return False
-        # Labels recorded with status 0 are not available, so they do not make a segmentation.
-        if not subject.available_labels("segmentation"):
-            return self.config.include_subjects_without_segmentation
-        return any(status in self.config.eligible_label_values for status in subject.segmentation.values())
+        if stat.st_mtime_ns == fingerprint.mtime_ns:
+            return True
+        memo = (str(path), stat.st_size, stat.st_mtime_ns, fingerprint.sha256)
+        if memo not in self._still_approved:
+            self._still_approved[memo] = _sha256(path) == fingerprint.sha256
+        return self._still_approved[memo]
 
     # ------------------------------------------------------------------ users
     @property
@@ -655,7 +795,7 @@ class QCStore:
                 assignment.state = "expired"
                 changed = True
                 self.audit.event(
-                    f"Assignment {assignment.assignment_id} ({assignment.subject_key}, {assignment.user}) expired."
+                    f"Assignment {assignment.assignment_id} ({assignment.scan_key}, {assignment.user}) expired."
                 )
         if changed:
             self._save_assignments()
@@ -671,9 +811,9 @@ class QCStore:
                     bucket["edited" if assignment.role == EDITOR else "reviewed"] += 1
         return counts
 
-    def _leased_subjects(self) -> set[str]:
-        """Caller holds the lock and has expired stale leases. The subjects out right now."""
-        return {assignment.subject_key for assignment in self._assignments.values() if assignment.state == "assigned"}
+    def _leased_scans(self) -> set[str]:
+        """Caller holds the lock and has expired stale leases. The scans out right now."""
+        return {assignment.scan_key for assignment in self._assignments.values() if assignment.state == "assigned"}
 
     def _held(self, user_name: str, role: str | None) -> list[Assignment]:
         """Caller holds the lock. What a user holds, in ``role`` or in any."""
@@ -684,20 +824,20 @@ class QCStore:
         ]
 
     def open_assignments_of(self, user_name: str, role: str | None = None) -> list[Assignment]:
-        """The subjects a user holds; with ``role``, those handed to them in that role, which
+        """The scans a user holds; with ``role``, those handed to them in that role, which
         is what each client lists."""
         with self._lock:
             self._expire_stale_assignments()
             return self._held(user_name, role)
 
-    def next_subject(self, user: User, role: str) -> Assignment:
-        """Pick a subject for this user, in the role of their client, and lease it to them.
+    def next_scan(self, user: User, role: str) -> Assignment:
+        """Pick a scan for this user, in the role of their client, and lease it to them.
 
-        A reviewer is handed the subjects waiting for a review: first those already in
-        progress, then those nobody has looked at yet. An editor is handed the subjects a
+        A reviewer is handed the scans waiting for a review: first those already in
+        progress, then those nobody has looked at yet. An editor is handed the scans a
         reviewer sent back, and those without any segmentation. Nobody reviews their own
-        correction, and nobody is handed a subject they could do nothing with. A user holds one
-        subject at a time in each role, until they submit or release it.
+        correction, and nobody is handed a scan they could do nothing with. A user holds one
+        scan at a time in each role, until they submit or release it.
         """
         if role not in ROLES:
             raise QCError(f"'{role}' is not a role. Use 'reviewer' or 'editor'.")
@@ -716,26 +856,28 @@ class QCStore:
                 # that lost its local copy can pick the same work back up.
                 return min(held, key=lambda a: a.assigned_at)
 
-            # A subject whose approval is being written is finished, whatever stage it was at.
-            leased = self._leased_subjects() | self._applying
+            # A scan whose approval is being written is finished, whatever stage it was at.
+            leased = self._leased_scans() | self._applying
             chosen = next(
                 (
                     (ref, case)
                     for ref, case in self._candidates(user, role)
-                    if ref.subject_key not in leased and ref.subject_key not in claimed_elsewhere
+                    if ref.scan_key not in leased and ref.scan_key not in claimed_elsewhere
                 ),
                 None,
             )
             if chosen is None:
                 waiting = "a review" if role == REVIEWER else "an editor"
-                raise QCError(f"No subject is waiting for {waiting} right now.", status_code=404)
+                raise QCError(f"No scan is waiting for {waiting} right now.", status_code=404)
             ref, case = chosen
+            dataset_id, subject_id, scan_id = ref.ids
             now = datetime.now(timezone.utc)
             assignment = Assignment(
                 assignment_id=uuid.uuid4().hex,
-                subject_key=ref.subject_key,
-                dataset_id=ref.dataset_id,
-                subject_id=ref.subject_id,
+                scan_key=ref.scan_key,
+                dataset_id=dataset_id,
+                subject_id=subject_id,
+                scan_id=scan_id,
                 user=user.name,
                 role=role,
                 case_revision=case.revision if case is not None else 0,
@@ -754,24 +896,25 @@ class QCStore:
                 "user": user.name,
                 "role": role,
                 "stage": stage,
-                "dataset_id": ref.dataset_id,
-                "subject_id": ref.subject_id,
-                "subject_key": ref.subject_key,
+                "scan_key": ref.scan_key,
+                "dataset_id": assignment.dataset_id,
+                "subject_id": assignment.subject_id,
+                "scan_id": assignment.scan_id,
                 "expires_at": assignment.expires_at,
             },
             summary=(
-                f"Assigned subject {ref.subject_key} to '{user.name}' as {role} "
+                f"Assigned scan {ref.scan_key} to '{user.name}' as {role} "
                 f"(assignment {assignment.assignment_id})."
             ),
         )
         return assignment
 
-    def _candidates(self, user: User, role: str) -> list[tuple[SubjectRef, Case | None]]:
-        """Caller holds the lock. The subjects this user could be handed in this role, in order:
+    def _candidates(self, user: User, role: str) -> list[tuple[ScanRef, Case | None]]:
+        """Caller holds the lock. The scans this user could be handed in this role, in order:
         those in progress at the role's stage, then those nobody has given a verdict on, then
         those this user released."""
         stage = workflow.STAGE_OF_ROLE[role]
-        in_progress: list[tuple[SubjectRef, Case | None]] = []
+        in_progress: list[tuple[ScanRef, Case | None]] = []
         for case in self._cases.values():
             if case.stage != stage or not self._user_may_access(user, case.dataset_id):
                 continue
@@ -780,15 +923,15 @@ class QCStore:
             has_segmentation = case.staged or case.base is not None
             if not _could_work_on(user, role, has_segmentation):
                 continue
-            ref = SubjectRef(case.dataset_id, case.subject_id, case.subject_key, True, has_segmentation)
+            ref = ScanRef(case.scan_key, True, has_segmentation)
             in_progress.append((ref, case))
         in_progress.sort(key=lambda item: item[0].sort_key)
 
-        # A subject nobody has looked at goes to the reviewers, unless it has no segmentation to review.
-        fresh: list[tuple[SubjectRef, Case | None]] = [
+        # A scan nobody has looked at goes to the reviewers, unless it has no segmentation to review.
+        fresh: list[tuple[ScanRef, Case | None]] = [
             (ref, None)
             for ref in self._index
-            if ref.subject_key not in self._cases
+            if ref.scan_key not in self._cases
             and self._user_may_access(user, ref.dataset_id)
             and ref.has_segmentation == (role == REVIEWER)
             and _could_work_on(user, role, ref.has_segmentation)
@@ -797,15 +940,15 @@ class QCStore:
             random.shuffle(in_progress)
             random.shuffle(fresh)
 
-        # What this user released goes last for them, so Release skips a subject rather than
+        # What this user released goes last for them, so Release skips a scan rather than
         # handing it straight back. The sort is stable: the order above holds otherwise.
         released = {
-            a.subject_key
+            a.scan_key
             for a in self._assignments.values()
             if a.user == user.name and a.role == role and a.state == "released"
         }
         candidates = in_progress + fresh
-        candidates.sort(key=lambda item: item[0].subject_key in released)
+        candidates.sort(key=lambda item: item[0].scan_key in released)
         return candidates
 
     def get_assignment(self, assignment_id: str, user: User | None = None) -> Assignment:
@@ -818,7 +961,7 @@ class QCStore:
         return assignment
 
     def release_assignment(self, assignment_id: str, user: User | None = None) -> Assignment:
-        """Give a subject back without judging it, so somebody else can take it."""
+        """Give a scan back without judging it, so somebody else can take it."""
         with self._lock:
             assignment = self.get_assignment(assignment_id, user)
             if assignment.state != "assigned":
@@ -831,11 +974,12 @@ class QCStore:
                 "assignment_id": assignment_id,
                 "user": assignment.user,
                 "role": assignment.role,
-                "subject_key": assignment.subject_key,
+                "scan_key": assignment.scan_key,
                 "dataset_id": assignment.dataset_id,
                 "subject_id": assignment.subject_id,
+                "scan_id": assignment.scan_id,
             },
-            summary=f"Released subject {assignment.subject_key} back to the queue.",
+            summary=f"Released scan {assignment.scan_key} back to the queue.",
         )
         return assignment
 
@@ -868,14 +1012,14 @@ class QCStore:
         return self.state_dir / DONE_CASES_FILE_NAME
 
     def _load_cases(self) -> dict[str, Case]:
-        """Every case of this server. Where a subject is in both files -- finished, then reopened,
+        """Every case of this server. Where a scan is in both files -- finished, then reopened,
         or a crash between the two writes -- the case of the later revision is the one."""
         cases: dict[str, Case] = {}
 
         def keep(case: Case) -> None:
-            known = cases.get(case.subject_key)
+            known = cases.get(case.scan_key)
             if known is None or case.revision >= known.revision:
-                cases[case.subject_key] = case
+                cases[case.scan_key] = case
 
         if self.done_cases_path.exists():
             with open(self.done_cases_path, "r", encoding="utf-8") as f:
@@ -910,52 +1054,61 @@ class QCStore:
             f.write(json.dumps(case.model_dump(), ensure_ascii=False) + "\n")
         self._save_cases()
 
-    def case_of(self, subject_key: str) -> Case | None:
-        """A copy of the subject's case, or None when nobody has given a verdict on it."""
+    def case_of(self, scan_key: str) -> Case | None:
+        """A copy of the scan's case, or None when nobody has given a verdict on it."""
         with self._lock:
-            case = self._cases.get(subject_key)
+            case = self._cases.get(scan_key)
             return case.model_copy(deep=True) if case is not None else None
 
     def handout_case(self, assignment: Assignment) -> Case:
-        """The subject's case as it stands, or as it would begin, for a handout."""
-        return self.case_of(assignment.subject_key) or self._new_case(
-            assignment.dataset_id, assignment.subject_id, fingerprint=False
-        )
+        """The scan's case as it stands, or as it would begin, for a handout."""
+        return self.case_of(assignment.scan_key) or self._new_case(assignment.scan_key, fingerprint=False)
 
-    def _new_case(self, dataset_id: int, subject_id: int, fingerprint: bool = True) -> Case:
-        """The case a subject nobody has given a verdict on begins with, read from the dataset.
+    def _new_case(self, scan_key: str, fingerprint: bool = True) -> Case:
+        """The case a scan nobody has given a verdict on begins with, read from the dataset: the
+        origins scan.json gives its labels, the labels its segmentation paints, and those of them
+        a server on this database has reviewed already.
 
-        ``fingerprint`` records the dataset's segmentation as it is now, so that approving the
+        ``fingerprint`` records the scan's segmentation as it is now, so that approving the
         case can tell whether anything else wrote it meanwhile. That reads the whole file.
         """
-        subject = self.subject_info(dataset_id, subject_id)
-        path = self.segmentation_path(dataset_id, subject_id)
+        scan = self.scan_info(scan_key)
+        path = self.segmentation_path(scan_key)
         painted = [segment.label for segment in self._segment_table_of(path)]
+        origins = dict(scan.segmentation or {})
+        unlisted = sorted(set(painted) - set(origins))
+        if unlisted and fingerprint:
+            self.audit.event(
+                f"The segmentation of {scan_key} holds {', '.join(unlisted)}, which its {layout.SCAN_JSON} does not "
+                "list; they are reviewed, but approving the scan needs their origin in scan.json.",
+                level=logging.WARNING,
+            )
         return workflow.start_case(
-            dataset_id,
-            subject_id,
-            subject_key_of(dataset_id, subject_id),
-            dict(subject.segmentation or {}),
+            scan_key,
+            scan_ids(scan_key),
+            origins,
             painted,
-            self.config.eligible_label_values,
+            self.reviewed_labels(scan_key),
+            self.config.eligible_origins,
+            self.config.eligible_review_states,
             file_fingerprint(path) if fingerprint else None,
             utc_now_iso(),
         )
 
     def cases(self, stages: Iterable[str] | None = None, limit: int = 500, comment: str | None = None) -> list[dict]:
         """The cases of this server, most recently changed first, each with ``leased_to``: who
-        holds the subject right now, if anybody.
+        holds the scan right now, if anybody.
 
         ``comment`` keeps the cases with a comment that contains it, anywhere in their history
         and whoever wrote it, ignoring case and spacing; a remark the administrator added to
-        Subject_info counts as a comment. Each then carries ``matches``: the steps of its
+        scan.json counts as a comment. Each then carries ``matches``: the steps of its
         history whose comment or remark does.
         """
         wanted = set(stages) if stages else None
         needle = _searchable(comment)
         with self._lock:
             self._expire_stale_assignments()
-            holders = {a.subject_key: a.user for a in self._assignments.values() if a.state == "assigned"}
+            holders = {a.scan_key: a.user for a in self._assignments.values() if a.state == "assigned"}
             found: list[tuple[Case, list]] = []
             for case in self._cases.values():
                 if wanted is not None and case.stage not in wanted:
@@ -974,53 +1127,34 @@ class QCStore:
             return [
                 {
                     **case.model_dump(),
-                    "leased_to": holders.get(case.subject_key),
+                    "leased_to": holders.get(case.scan_key),
                     **({"matches": [event.model_dump() for event in matches]} if needle is not None else {}),
                 }
                 for case, matches in found[:limit]
             ]
 
-    def case_segmentation_path(self, subject_key: str) -> Path:
-        """The segmentation a case is about: its editor's correction, or the dataset's own."""
-        case = self._require_case(subject_key)
-        path = self.current_segmentation_path(case.dataset_id, case.subject_id)
+    def case_segmentation_path(self, scan_key: str) -> Path:
+        """The segmentation a case is about: its editor's correction, or the scan's own."""
+        case = self._require_case(scan_key)
+        path = self.current_segmentation_path(case.scan_key)
         if path is None:
-            raise QCError(f"Subject {subject_key} has no segmentation.", status_code=404)
+            raise QCError(f"Scan {scan_key} has no segmentation.", status_code=404)
         return path
 
-    def _require_case(self, subject_key: str) -> Case:
+    def _require_case(self, scan_key: str) -> Case:
         with self._lock:
-            case = self._cases.get(subject_key)
+            case = self._cases.get(scan_key)
         if case is None:
-            raise QCError(f"Nobody has given a verdict on subject {subject_key} on this server.", status_code=404)
+            raise QCError(f"Nobody has given a verdict on scan {scan_key} on this server.", status_code=404)
         return case
 
     # ------------------------------------------------------------ dataset i/o
-    def _read_subject_info(self, dataset_id: int, missing_ok: bool = False) -> list[SubjectInfo] | None:
-        path = self.subject_info_path(dataset_id)
-        if not path.exists():
-            if missing_ok:
-                self.audit.event(f"No Subject_info file at '{path}'; dataset skipped.")
-                return None
-            raise QCError(f"Subject info file '{path.name}' is missing.", status_code=500)
-        try:
-            # Reading and validating are guarded together: a dataset whose file is
-            # truncated, half-written or hand-edited must not take the whole server down.
-            with open(path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            return [SubjectInfo(**entry) for entry in raw]
-        except Exception as exc:
-            if missing_ok:
-                self.audit.event(f"Could not parse '{path}': {exc}")
-                return None
-            raise QCError(f"Could not parse '{path.name}': {exc}", status_code=500) from exc
-
     def _read_dataset_info(self, dataset_id: int) -> dict:
+        """A dataset's dataset.json, as the format writes it; empty when there is none."""
         path = self.dataset_info_path(dataset_id)
         if not path.exists():
             return {}
-        with open(path, "r", encoding="utf-8") as f:
-            return DatasetInfo(**json.load(f)).sorted_dict()
+        return DatasetInfo.load(path).to_dict()
 
     def dataset_info(self, dataset_id: int) -> dict:
         with self._lock:
@@ -1028,50 +1162,48 @@ class QCStore:
         return cached if cached is not None else self._read_dataset_info(dataset_id)
 
     def _require_compatible_dataset(self, dataset_id: int) -> None:
-        """Refuse a dataset that was regenerated under another schema meanwhile."""
-        version = self._read_dataset_info(dataset_id).get("schema_version")
+        """Refuse a dataset that was converted again, in another version of the format, meanwhile."""
+        try:
+            version = self._read_dataset_info(dataset_id).get("schema_version")
+        except Exception:
+            version = None
         if not is_compatible_schema_version(version):
             raise QCError(
-                f"Dataset {dataset_id} is now at schema version {version or '(not recorded)'}, but this server "
-                f"writes {SCHEMA_VERSION}; nothing was recorded.",
+                f"Dataset {layout.dataset_dir_name(dataset_id)} is now in version {version or '(not recorded)'} of "
+                f"the BoneHub format, but this server writes {SCHEMA_VERSION}; nothing was recorded.",
                 status_code=409,
             )
 
-    def subject_info(self, dataset_id: int, subject_id: int) -> SubjectInfo:
-        subjects = self._read_subject_info(dataset_id)
-        for subject in subjects or []:
-            if subject.subject_id == subject_id:
-                return subject
-        raise QCError(
-            f"Subject {subject_key_of(dataset_id, subject_id)} is not in the subject info file.", status_code=404
-        )
+    def scan_info(self, scan_key: str) -> ScanInfo:
+        """The scan's scan.json, read afresh: a long-running server never acts on a stale copy of
+        a file another tool may have changed."""
+        path = self.scan_info_path(scan_key)
+        try:
+            return ScanInfo.load(path)
+        except FileNotFoundError as exc:
+            raise QCError(f"Scan {scan_key} has no {layout.SCAN_JSON}.", status_code=404) from exc
+        except Exception as exc:
+            raise QCError(f"Could not read the {layout.SCAN_JSON} of scan {scan_key}: {exc}", status_code=500) from exc
 
-    def _mutate_subject_info(
-        self, dataset_id: int, subject_id: int, mutate: Callable[[SubjectInfo], None]
-    ) -> SubjectInfo:
-        """Re-read, modify one subject and write the file back atomically.
+    def subject_info(self, scan_key: str) -> dict:
+        """The subject.json of the person the scan is of, for the clients to show; empty when it
+        cannot be read."""
+        try:
+            return SubjectInfo.load(self.subject_info_path(scan_key)).to_dict()
+        except Exception:
+            return {}
 
-        The file is always re-read from disk so a long-running server never writes back a
-        stale copy of a dataset that another tool edited in the meantime.
-        """
-        path = self.subject_info_path(dataset_id)
-        subjects = self._read_subject_info(dataset_id) or []
-        target = next((s for s in subjects if s.subject_id == subject_id), None)
-        if target is None:
-            raise QCError(
-                f"Subject {subject_key_of(dataset_id, subject_id)} is not in the subject info file.", status_code=404
-            )
-        mutate(target)
-        _atomic_write_json(path, [subject.sorted_dict() for subject in subjects])
-        return target
+    def _write_scan_info(self, scan_key: str, info: ScanInfo) -> None:
+        """Write the scan's scan.json, as the BoneHub format writes it."""
+        _write_metadata(self.scan_info_path(scan_key), info.to_dict())
 
-    def segment_table(self, dataset_id: int, subject_id: int) -> list[SegmentDescription]:
-        """The segments of the subject's segmentation under quality check, from its header alone.
+    def segment_table(self, scan_key: str) -> list[SegmentDescription]:
+        """The segments of the scan's segmentation under quality check, from its header alone.
 
         Empty when there is no segmentation, and when its header cannot be read: a client
         that downloads the file still gets its handout, and the problem is logged.
         """
-        path = self.current_segmentation_path(dataset_id, subject_id)
+        path = self.current_segmentation_path(scan_key)
         return self._segment_table_of(path) if path is not None else []
 
     def _segment_table_of(self, path: Path) -> list[SegmentDescription]:
@@ -1081,18 +1213,18 @@ class QCStore:
             return read_segment_table(path)
         except SegmentationError as exc:
             self.audit.event(
-                f"The segment table of '{path.name}' could not be read: {exc}", level=logging.WARNING
+                f"The segment table of '{path}' could not be read: {exc}", level=logging.WARNING
             )
             return []
 
-    def stored_segmentation_issue(self, dataset_id: int, subject_id: int) -> str | None:
+    def stored_segmentation_issue(self, scan_key: str) -> str | None:
         """Why the segmentation under quality check cannot be accepted as it is, or None.
 
         Checked from the file headers, so a client can be told before anyone spends time on a
-        subject whose acceptance the server would refuse.
+        scan whose acceptance the server would refuse.
         """
-        path = self.current_segmentation_path(dataset_id, subject_id)
-        image_file = self.image_path(dataset_id, subject_id)
+        path = self.current_segmentation_path(scan_key)
+        image_file = self.image_path(scan_key)
         if path is None:
             return "There is no stored segmentation."
         if not self.config.require_geometry_match or not image_file.exists():
@@ -1103,10 +1235,11 @@ class QCStore:
             return str(exc)
         return None
 
+
     # ------------------------------------------------------------- submission
-    def inspect_segmentation(self, seg_path: Path, dataset_id: int, subject_id: int) -> UploadedSegmentation:
-        """Validate a ``.seg.nrrd``; its ``labels`` are the labels it contains."""
-        image_file = self.image_path(dataset_id, subject_id)
+    def inspect_segmentation(self, seg_path: Path, scan_key: str) -> UploadedSegmentation:
+        """Validate a ``.seg.nrrd`` for a scan; its ``labels`` are the labels it contains."""
+        image_file = self.image_path(scan_key)
         check_against = image_file if self.config.require_geometry_match and image_file.exists() else None
         try:
             return read_segmentation_upload(seg_path, check_against)
@@ -1126,20 +1259,20 @@ class QCStore:
         missing_labels: list[str] | None = None,
         role: str | None = None,
     ) -> "SubmissionOutcome":
-        """Record a user's verdict on the subject they hold, in this server's state folder.
+        """Record a user's verdict on the scan they hold, in this server's state folder.
 
-        Nothing in the dataset changes: the verdict moves the subject along its quality check
+        Nothing in the dataset changes: the verdict moves the scan along its quality check
         (see :mod:`workflow`), and only the administrator's approval (:meth:`approve`) writes
-        it into the dataset. A verdict is given in the role the subject was handed out in,
+        it into the dataset. A verdict is given in the role the scan was handed out in,
         which ``role``, the role of the client, must match:
 
         * a reviewer judges the segmentation as it is (``use_stored_segmentation``), label by
           label: ``confirmed_labels`` accepted, ``rejected_labels`` rejected, for an editor to
           correct or take out, and ``missing_labels`` reported missing, for an editor to add.
-          ``quality_check_confirmed=False`` rejects the subject as a whole: it goes to the
+          ``quality_check_confirmed=False`` rejects the scan as a whole: it goes to the
           administrator, not to the editors, and its labels stay as they were.
         * an editor uploads the corrected segmentation (``segmentation_tmp_path``), vouching for
-          ``confirmed_labels``. ``quality_check_confirmed=False`` sends the subject to the
+          ``confirmed_labels``. ``quality_check_confirmed=False`` sends the scan to the
           administrator.
 
         Nobody accepts or replaces a segmentation they have not been sent.
@@ -1194,7 +1327,7 @@ class QCStore:
         use_stored: bool,
         judges_labels: bool,
     ) -> str:
-        """The role a verdict is given in: the one the subject was handed out in.
+        """The role a verdict is given in: the one the scan was handed out in.
 
         What an account may do is checked against its roles first, whichever client the
         request says it comes from: only an editor uploads a segmentation, and only a reviewer
@@ -1215,13 +1348,13 @@ class QCStore:
         handed_as = assignment.role
         if role is not None and role != handed_as:
             raise QCError(
-                f"{assignment.subject_key} was handed to '{user.name}' as {_a(handed_as)}; submit it "
+                f"{assignment.scan_key} was handed to '{user.name}' as {_a(handed_as)}; submit it "
                 f"{'on the review page' if handed_as == REVIEWER else 'from 3D Slicer'}.",
                 status_code=409,
             )
         if handed_as not in user.roles:
             raise QCError(
-                f"'{user.name}' is no longer {_a(handed_as)}, the role {assignment.subject_key} was handed to "
+                f"'{user.name}' is no longer {_a(handed_as)}, the role {assignment.scan_key} was handed to "
                 "them in. Release it.",
                 status_code=403,
             )
@@ -1239,7 +1372,7 @@ class QCStore:
         missing: list[str],
         comment: str | None,
     ) -> "SubmissionOutcome":
-        key, dataset_id, subject_id = assignment.subject_key, assignment.dataset_id, assignment.subject_id
+        key, dataset_id = assignment.scan_key, assignment.dataset_id
         if confirmed and upload is not None:
             raise QCError(
                 f"{key} was handed to '{user.name}' for review, which judges the segmentation as it is: send the "
@@ -1249,7 +1382,7 @@ class QCStore:
             )
         case, revision = self._case_for_verdict(assignment, workflow.REVIEW)
         if not confirmed:
-            return self._reject_subject(assignment, user, case, revision, comment)
+            return self._reject_scan(assignment, user, case, revision, comment)
         painted = set(workflow.painted_labels(case))
         if not use_stored:
             raise QCError(
@@ -1271,8 +1404,8 @@ class QCStore:
             )
         rejected = sorted({*rejected, *missing})
         if confirmed_labels is None:
-            # Accepting "the subject" accepts what is under review, not what the dataset has
-            # as reviewed already.
+            # Accepting "the scan" accepts what is under review, not the labels kept: reviewed
+            # already, or of an origin the server does not queue.
             accepted = sorted(set(workflow.labels_in(case, workflow.PENDING)) - set(rejected))
         else:
             accepted = sorted(set(confirmed_labels))
@@ -1289,7 +1422,7 @@ class QCStore:
 
         # Accepting a painted label vouches for the segmentation as it is, so it is held to the
         # same rules as an upload. That reads the whole file, before the lock is taken.
-        path = self.current_segmentation_path(dataset_id, subject_id)
+        path = self.current_segmentation_path(key)
         if any(name in painted for name in accepted):
             if path is not None and not user.receives_segmentation:
                 raise QCError(
@@ -1299,9 +1432,9 @@ class QCStore:
                     status_code=403,
                 )
             if path is None:
-                raise QCError(f"Subject {key} has no segmentation to accept.", status_code=409)
+                raise QCError(f"Scan {key} has no segmentation to accept.", status_code=409)
             try:
-                stored = self.inspect_segmentation(path, dataset_id, subject_id)
+                stored = self.inspect_segmentation(path, key)
             except QCError as exc:
                 raise QCError(
                     f"The stored segmentation of {key} cannot be accepted as it is. {exc.message} An editor can "
@@ -1354,23 +1487,23 @@ class QCStore:
         self._record_submission(
             outcome,
             user,
-            f"Subject {key} reviewed by '{user.name}': {'; '.join(verdict) or 'no label judged'}. "
+            f"Scan {key} reviewed by '{user.name}': {'; '.join(verdict) or 'no label judged'}. "
             f"It now waits for {_STAGE_WAITS_FOR[snapshot.stage]}.",
             comment,
         )
         return outcome
 
-    def _reject_subject(
+    def _reject_scan(
         self, assignment: Assignment, user: User, case: Case, revision: int, comment: str | None
     ) -> "SubmissionOutcome":
-        """A reviewer rejected the subject as a whole: no correction of its segmentation would
+        """A reviewer rejected the scan as a whole: no correction of its segmentation would
         help. It goes to the administrator, and its labels stay as they were."""
-        key = assignment.subject_key
+        key = assignment.scan_key
         now = utc_now_iso()
         with self._lock:
             live = self._check_turn(assignment, revision)
             case = live if live is not None else case
-            workflow.reject_subject(case, user.name, comment, assignment.assignment_id, now)
+            workflow.reject_scan(case, user.name, comment, assignment.assignment_id, now)
             self._cases[key] = case
             self._save_cases()
             self._finish_assignment(assignment, False, comment, now, case.stage)
@@ -1380,12 +1513,12 @@ class QCStore:
             case=snapshot,
             pending_labels=workflow.labels_in(snapshot, workflow.PENDING),
             message=(
-                "Subject rejected: it goes to the administrator with your comment, not to the editors. Nothing in "
+                "Scan rejected: it goes to the administrator with your comment, not to the editors. Nothing in "
                 "the dataset changed."
             ),
         )
         self._record_submission(
-            outcome, user, f"Subject {key} rejected as a whole by '{user.name}'; it goes to the administrator.", comment
+            outcome, user, f"Scan {key} rejected as a whole by '{user.name}'; it goes to the administrator.", comment
         )
         return outcome
 
@@ -1400,7 +1533,7 @@ class QCStore:
         judges_labels: bool,
         comment: str | None,
     ) -> "SubmissionOutcome":
-        key, dataset_id, subject_id = assignment.subject_key, assignment.dataset_id, assignment.subject_id
+        key, dataset_id = assignment.scan_key, assignment.dataset_id
         if judges_labels:
             raise QCError(
                 f"{key} was handed to '{user.name}' for editing: an editor corrects the segmentation, and reviewers "
@@ -1426,7 +1559,7 @@ class QCStore:
                 message="Sent to the administrator with your comment. Nothing in the dataset changed.",
             )
             self._record_submission(
-                outcome, user, f"Subject {key} sent to the administrator by '{user.name}', who could not correct it.", comment
+                outcome, user, f"Scan {key} sent to the administrator by '{user.name}', who could not correct it.", comment
             )
             return outcome
 
@@ -1438,17 +1571,17 @@ class QCStore:
             )
         if upload is None:
             raise QCError("A confirmed submission must include the corrected segmentation file.")
-        current = self.current_segmentation_path(dataset_id, subject_id)
+        current = self.current_segmentation_path(key)
         if current is not None and not user.receives_segmentation:
             raise QCError(
                 f"'{user.name}' is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}, so cannot confirm or replace "
-                f"the segmentation of {key}, which they have not seen. Reject the subject with a comment instead.",
+                f"the segmentation of {key}, which they have not seen. Reject the scan with a comment instead.",
                 status_code=403,
             )
 
         # Checking the upload, comparing it with the segmentation it replaces and writing its
         # canonical form are the slow part, so they happen before the lock is taken.
-        uploaded = self.inspect_segmentation(upload, dataset_id, subject_id)
+        uploaded = self.inspect_segmentation(upload, key)
         present = uploaded.labels
         if not present:
             raise QCError("The uploaded segmentation is empty; there is nothing to confirm.")
@@ -1470,7 +1603,7 @@ class QCStore:
             with self._lock:
                 live = self._check_turn(assignment, revision)
                 case = live if live is not None else case
-                target = self.staged_path(dataset_id, subject_id)
+                target = self.staged_path(key)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 _replace(staged_tmp, target)
                 details = workflow.apply_edit(
@@ -1514,47 +1647,47 @@ class QCStore:
         self._record_submission(
             outcome,
             user,
-            f"Subject {key} corrected by '{user.name}': "
+            f"Scan {key} corrected by '{user.name}': "
             + (f"changed or added {', '.join(details['edited'])}" if details["edited"] else "no label changed")
             + (f"; removed {', '.join(details['removed'])}" if details["removed"] else "")
-            + f". The correction waits in '{self.staged_path(dataset_id, subject_id)}', and the subject for "
+            + f". The correction waits in '{self.staged_path(key)}', and the scan for "
             + f"{_STAGE_WAITS_FOR[snapshot.stage]}.",
             comment,
         )
         return outcome
 
     def _case_for_verdict(self, assignment: Assignment, stage: str) -> tuple[Case, int]:
-        """A working copy of the subject's case, and the revision it was copied at: 0 for a
-        subject nobody has given a verdict on, whose case begins with this one.
+        """A working copy of the scan's case, and the revision it was copied at: 0 for a
+        scan nobody has given a verdict on, whose case begins with this one.
 
-        Refuses a subject whose case has moved on from the stage the verdict belongs to.
+        Refuses a scan whose case has moved on from the stage the verdict belongs to.
         """
         with self._lock:
-            live = self._cases.get(assignment.subject_key)
+            live = self._cases.get(assignment.scan_key)
             case = live.model_copy(deep=True) if live is not None else None
         if case is None:
-            return self._new_case(assignment.dataset_id, assignment.subject_id), 0
+            return self._new_case(assignment.scan_key), 0
         if case.stage != stage:
             raise QCError(
-                f"{assignment.subject_key} no longer waits for {_STAGE_WAITS_FOR[stage]}: it waits for "
+                f"{assignment.scan_key} no longer waits for {_STAGE_WAITS_FOR[stage]}: it waits for "
                 f"{_STAGE_WAITS_FOR[case.stage]}. The verdict was not recorded.",
                 status_code=409,
             )
         return case, case.revision
 
     def _check_turn(self, assignment: Assignment, revision: int) -> Case | None:
-        """Caller holds the lock. The subject's live case, once it is sure the verdict counts.
+        """Caller holds the lock. The scan's live case, once it is sure the verdict counts.
 
         A user whose lease ran out may still submit, so their work is not lost -- unless the
-        subject has been handed to someone else since, or its case changed after the user was
+        scan has been handed to someone else since, or its case changed after the user was
         handed it, or after the verdict was checked against it, or the administrator is
         approving it right now.
         """
-        key = assignment.subject_key
+        key = assignment.scan_key
         if key in self._applying:
             raise QCError(
                 f"The administrator is approving or closing {key} right now, so the verdict was not recorded. Ask "
-                "for the next subject.",
+                "for the next scan.",
                 status_code=409,
             )
         if assignment.state == "expired":
@@ -1562,10 +1695,10 @@ class QCStore:
             for other in reversed(self._assignments.values()):
                 if other is assignment:
                     break
-                later = later or other.subject_key == key
+                later = later or other.scan_key == key
             if later:
                 raise QCError(
-                    f"The lease of '{assignment.user}' on {key} ran out, and the subject has been handed out again "
+                    f"The lease of '{assignment.user}' on {key} ran out, and the scan has been handed out again "
                     "since; the verdict was not recorded.",
                     status_code=409,
                 )
@@ -1574,7 +1707,7 @@ class QCStore:
         if current != revision or current != assignment.case_revision:
             raise QCError(
                 f"{key} changed after it was handed out -- someone else gave a verdict on it, or the administrator "
-                "acted on it -- so the verdict was not recorded. Ask for the next subject.",
+                "acted on it -- so the verdict was not recorded. Ask for the next scan.",
                 status_code=409,
             )
         return live
@@ -1600,9 +1733,10 @@ class QCStore:
                 "assignment_id": assignment.assignment_id,
                 "user": assignment.user,
                 "role": assignment.role,
+                "scan_key": assignment.scan_key,
                 "dataset_id": assignment.dataset_id,
                 "subject_id": assignment.subject_id,
-                "subject_key": assignment.subject_key,
+                "scan_id": assignment.scan_id,
                 "quality_check_confirmed": bool(assignment.quality_check_confirmed),
                 "stage": outcome.case.stage,
                 "accepted_labels": outcome.accepted_labels,
@@ -1624,176 +1758,199 @@ class QCStore:
     # --------------------------------------------------------------- approval
     def approve(
         self,
-        subject_key: str,
+        scan_key: str,
         remark: str | None = None,
         allow_unaccepted: bool = False,
         revision: int | None = None,
     ) -> "ApprovalOutcome":
-        """Write an approved subject into the dataset.
+        """Write an approved scan into the dataset.
 
-        The accepted labels become reviewed (2) in ``Subject_info``, labels no longer in the
-        segmentation not available (0) under ``mark_removed_labels_absent``, and an editor's
-        correction replaces the dataset's segmentation, which is backed up first. ``remark`` is
-        added to the subject's remarks as ``QC: <remark>``, unless they say so already.
+        An editor's correction replaces the scan's segmentation, which is backed up first, and
+        scan.json lists the labels of the segmentation with their origins: ``manual`` for those
+        an editor drew or changed, the origin they had for the rest. The labels a reviewer
+        accepted become reviewed, for every server on the database (see ``workflow.reviewed_after``).
+        ``remark`` is added to the scan's remarks as ``QC: <remark>``, unless they say so already.
 
-        A subject is approved once it waits for approval. ``allow_unaccepted`` approves one at
+        A scan is approved once it waits for approval. ``allow_unaccepted`` approves one at
         any other stage too -- one a reviewer rejected, an editor gave up on, or the
-        administrator closed -- and the labels nobody accepted keep the status the dataset
-        gives them. Refused when somebody holds the subject, when its case changed after the
-        administrator saw it at ``revision``, and when the dataset's segmentation changed after
-        its quality check began: another server or tool wrote it, and approving would overwrite
-        what they wrote.
+        administrator closed -- and the labels nobody accepted do not become reviewed. Refused
+        when somebody holds the scan, when its case changed after the administrator saw it at
+        ``revision``, and when the scan's segmentation changed after its quality check began:
+        another server or tool wrote it, and approving would overwrite what they wrote.
         """
         remark = _check_remark(remark)
         with self._lock:
-            case = self._admin_case(subject_key)
+            case = self._admin_case(scan_key)
             _check_revision(case, revision, "approving it")
             if case.stage != workflow.APPROVAL and not allow_unaccepted:
                 raise QCError(
-                    f"Subject {subject_key} is not waiting for approval: it waits for {_STAGE_WAITS_FOR[case.stage]}.",
+                    f"Scan {scan_key} is not waiting for approval: it waits for {_STAGE_WAITS_FOR[case.stage]}.",
                     status_code=409,
                 )
-            self._applying.add(subject_key)
+            self._applying.add(scan_key)
             snapshot = case.model_copy(deep=True)
         try:
             with self._dataset_lock:
-                updated, backup_path, remark_added = self._write_approved(snapshot, remark)
+                written = self._write_approved(snapshot, remark)
                 now = utc_now_iso()
                 with self._lock:
-                    case = self._cases[subject_key]
-                    written = case.staged
+                    case = self._cases[scan_key]
+                    segmentation_written = case.staged
                     details = workflow.mark_applied(
                         case,
-                        updated,
-                        str(backup_path) if backup_path else None,
+                        written.origins,
+                        written.changes,
+                        written.result,
+                        str(written.backup_path) if written.backup_path else None,
                         now,
                         remark=remark,
-                        remark_added=remark_added,
+                        remark_added=written.remark_added,
+                        outdated=written.outdated,
                     )
                     self._archive(case)
                     # Keep the cached index honest until the next full rebuild.
-                    self._index = [ref for ref in self._index if ref.subject_key != subject_key]
-                    self._index_by_key.pop(subject_key, None)
+                    self._index = [ref for ref in self._index if ref.scan_key != scan_key]
+                    self._index_by_key.pop(scan_key, None)
                     applied = case.model_copy(deep=True)
         finally:
             with self._lock:
-                self._applying.discard(subject_key)
+                self._applying.discard(scan_key)
 
-        target = self.segmentation_path(applied.dataset_id, applied.subject_id)
-        reviewed = sorted(name for name, status in updated.items() if status == 2)
-        removed = sorted(name for name, status in updated.items() if status == 0)
+        target = self.segmentation_path(scan_key)
+        changes, reviewed, outdated = written.changes, details["reviewed_labels"], written.outdated
+        redrawn = sorted(name for name, origin in changes.items() if origin == EDITED_ORIGIN)
+        removed = sorted(name for name, origin in changes.items() if origin is None)
         not_accepted = details["not_accepted"]
+        remark_added = written.remark_added
         self.audit.record(
             "approved",
             {
-                "subject_key": subject_key,
+                "scan_key": scan_key,
                 "dataset_id": applied.dataset_id,
                 "subject_id": applied.subject_id,
+                "scan_id": applied.scan_id,
                 "from_stage": snapshot.stage,
-                "updated_labels": updated,
+                "updated_labels": changes,
+                "reviewed_labels": reviewed,
                 "not_accepted": not_accepted,
+                "outdated": outdated,
                 "remark": remark,
                 "remark_added": remark_added,
-                "segmentation_written": written,
+                "segmentation_written": segmentation_written,
                 "segmentation_path": str(target),
                 "backup_path": applied.backup_path,
                 "verdicts": _verdicts_of(applied),
             },
             dataset_id=applied.dataset_id,
             summary=(
-                f"Subject {subject_key} approved"
+                f"Scan {scan_key} approved"
                 + (f" while it waited for {_STAGE_WAITS_FOR[snapshot.stage]}" if snapshot.stage != workflow.APPROVAL else "")
-                + f": {len(reviewed)} label(s) set to 2 (reviewed)"
+                + f": {len(reviewed)} label(s) reviewed"
                 + (f" ({', '.join(reviewed)})" if reviewed else "")
-                + (f"; {', '.join(removed)} set to 0 (not available)" if removed else "")
-                + (f"; not set to 2, as nobody accepted them: {_not_accepted_text(applied)}" if not_accepted else "")
+                + (f"; {', '.join(redrawn)} recorded as {EDITED_ORIGIN} in {layout.SCAN_JSON}" if redrawn else "")
+                + (f"; {', '.join(removed)} taken out of {layout.SCAN_JSON}" if removed else "")
+                + (f"; not reviewed, as nobody accepted them: {_not_accepted_text(applied)}" if not_accepted else "")
                 + (f"; '{remark}' added to its remarks" if remark_added else "")
                 + (f"; its remarks said '{remark}' already" if remark and not remark_added else "")
                 + (
-                    f"; the corrected segmentation by '{snapshot.edited_by}' written to '{target}'."
-                    if written
-                    else "; the segmentation is the dataset's own, unchanged."
+                    f"; the corrected segmentation by '{snapshot.edited_by}' written to '{target}'"
+                    if segmentation_written
+                    else "; the segmentation is the scan's own, unchanged"
                 )
-                + " "
+                + (f"; {_outdated_text(outdated)} made from the old segmentation, and left as they were" if outdated else "")
+                + ". "
                 + _verdicts_text(applied)
             ),
         )
         return ApprovalOutcome(
             case=applied,
-            updated_labels=updated,
-            segmentation_written=written,
+            updated_labels=changes,
+            reviewed_labels=reviewed,
+            segmentation_written=segmentation_written,
             backup_path=applied.backup_path,
             remark=remark,
             remark_added=remark_added,
+            outdated=outdated,
             message=(
-                f"Approved: {len(reviewed)} label(s) set to reviewed"
-                + (" and the corrected segmentation written into the dataset" if written else "")
-                + (f"; {len(not_accepted)} label(s) nobody accepted keep their status" if not_accepted else "")
+                f"Approved: {len(reviewed)} label(s) reviewed"
+                + (" and the corrected segmentation written into the dataset" if segmentation_written else "")
+                + (f"; {len(not_accepted)} label(s) nobody accepted are not reviewed" if not_accepted else "")
                 + (f"; '{remark}' added to its remarks" if remark_added else "")
                 + (f"; its remarks said '{remark}' already" if remark and not remark_added else "")
+                + (f"; {_outdated_text(outdated)} made from the old segmentation are out of date" if outdated else "")
                 + "."
             ),
         )
 
-    def _write_approved(self, case: Case, remark: str | None = None) -> tuple[dict[str, int], Path | None, bool]:
-        """Caller holds the dataset lock. Write a case into the dataset, and ``remark`` into the
-        subject's remarks; returns the statuses set, where the dataset's previous segmentation
-        was backed up, and whether the remark was added (not there already).
+    def _write_approved(self, case: Case, remark: str | None = None) -> "_Written":
+        """Caller holds the dataset lock. Write a case into the dataset: an editor's correction
+        in place of the scan's segmentation, and the origins of its labels and ``remark`` into
+        scan.json, which is left alone when neither changes it. Returns what was written.
 
-        If ``Subject_info`` cannot be written after the segmentation was, the segmentation is
-        put back, so that the dataset is not left half approved.
+        If scan.json cannot be written after the segmentation was, the segmentation is put back,
+        so that the scan is not left half approved.
         """
-        dataset_id, subject_id, key = case.dataset_id, case.subject_id, case.subject_key
-        self._require_compatible_dataset(dataset_id)
-        target = self.segmentation_path(dataset_id, subject_id)
+        key = case.scan_key
+        self._require_compatible_dataset(case.dataset_id)
+        target = self.segmentation_path(key)
         if not same_file(case.base, target):
             raise QCError(
-                f"The dataset's segmentation of {key} changed after its quality check began -- another server or "
-                "tool wrote it -- so approving would overwrite that. Send the subject back to review.",
+                f"The segmentation of {key} changed after its quality check began -- another server or tool "
+                "wrote it -- so approving would overwrite that. Send the scan back to review.",
                 status_code=409,
             )
-        staged = self.staged_path(dataset_id, subject_id) if case.staged else None
+        staged = self.staged_path(key) if case.staged else None
         if staged is not None:
             if not staged.exists():
                 raise QCError(
-                    f"The corrected segmentation of {key} is missing from '{staged.parent}'. Send the subject back "
+                    f"The corrected segmentation of {key} is missing from '{staged.parent}'. Send the scan back "
                     "to the editors.",
                     status_code=409,
                 )
-            image_file = self.image_path(dataset_id, subject_id)
+            image_file = self.image_path(key)
             if self.config.require_geometry_match and image_file.exists():
                 try:
                     check_stored_geometry(staged, image_file)
                 except SegmentationError as exc:
                     raise QCError(
-                        f"The corrected segmentation of {key} no longer fits its image: {exc} Send the subject back "
+                        f"The corrected segmentation of {key} no longer fits its image: {exc} Send the scan back "
                         "to the editors.",
                         status_code=409,
                     ) from exc
 
-        statuses = dict(self.subject_info(dataset_id, subject_id).segmentation or {})
-        updated = workflow.approval_statuses(case, statuses, self.config.mark_removed_labels_absent)
+        info = self.scan_info(key)
+        before = dict(info.segmentation or {})
+        try:
+            origins = workflow.approval_origins(case, before)
+        except workflow.UnknownOrigin as exc:
+            raise QCError(
+                f"The segmentation of {key} holds {', '.join(exc.labels)}, which its {layout.SCAN_JSON} does not "
+                "list and no editor drew, so where it comes from is unknown. Add it to the segmentation in "
+                f"'{self.scan_info_path(key)}' with its origin -- 'source', if it came with the source dataset -- "
+                "and approve again.",
+                status_code=409,
+            ) from exc
+        changes = workflow.changed_origins(before, origins)
+        remarks = workflow.with_remark(info.remarks, remark) if remark else None
+        redrawn = {name for name, label in case.labels.items() if label.painted and label.drawn}
+        outdated = {
+            kind: sorted(set(getattr(info, kind) or {}) & (redrawn | {n for n, o in changes.items() if o is None}))
+            for kind in layout.MODEL_KINDS
+        }
+        outdated = {kind: labels for kind, labels in outdated.items() if labels}
 
         previous: Path | None = None
         if staged is not None:
             if target.exists():
                 previous = self.new_upload_path(prefix="previous")
                 shutil.copy2(target, previous)
-            target.parent.mkdir(parents=True, exist_ok=True)
             _replace(staged, target)
-        remark_added = False
         try:
-
-            def apply(subject: SubjectInfo) -> None:
-                nonlocal remark_added
-                for label, status in updated.items():
-                    subject.set_segmentation_value(label, status)
-                remarks = workflow.with_remark(subject.remarks, remark) if remark else None
+            if changes or remarks is not None:
+                info.set_labels("segmentation", list(origins), origins)
                 if remarks is not None:
-                    subject.remarks = remarks
-                    remark_added = True
-
-            self._mutate_subject_info(dataset_id, subject_id, apply)
+                    info.remarks = remarks
+                self._write_scan_info(key, info)
         except Exception:
             if staged is not None:
                 _replace(target, staged)
@@ -1801,46 +1958,51 @@ class QCStore:
                     _replace(previous, target)
             raise
 
+        if staged is not None:
+            result = file_fingerprint(target)
+        else:
+            # Unchanged, as same_file found above: only its time may have moved since the case began.
+            result = _restamped(case.base, target)
         backup_path = None
         if previous is not None:
             if self.config.keep_segmentation_backups:
-                backup_path = self._backup_destination(target)
+                backup_path = self._backup_destination(key)
                 _replace(previous, backup_path)
             else:
                 previous.unlink(missing_ok=True)
-        return updated, backup_path, remark_added
+        return _Written(origins, changes, result, backup_path, remarks is not None, outdated)
 
     def approve_all(
         self,
-        subject_keys: Iterable[str] | None = None,
+        scan_keys: Iterable[str] | None = None,
         remark: str | None = None,
         allow_unaccepted: bool = False,
         revisions: dict[str, int] | None = None,
     ) -> list[dict]:
-        """Approve each subject named, or every one waiting for approval; one that cannot be
+        """Approve each scan named, or every one waiting for approval; one that cannot be
         approved is reported and the rest go ahead. ``remark`` and ``allow_unaccepted`` are as
-        for :meth:`approve`, and ``revisions`` holds the revision each subject was seen at."""
+        for :meth:`approve`, and ``revisions`` holds the revision each scan was seen at."""
         _check_remark(remark)  # a remark too long is refused before anything is approved
-        if subject_keys is None:
+        if scan_keys is None:
             with self._lock:
-                subject_keys = sorted(k for k, case in self._cases.items() if case.stage == workflow.APPROVAL)
+                scan_keys = sorted(k for k, case in self._cases.items() if case.stage == workflow.APPROVAL)
         revisions = revisions or {}
 
         def approve(key: str) -> dict:
             outcome = self.approve(key, remark, allow_unaccepted, revisions.get(key))
             return {"message": outcome.message, "remark_added": outcome.remark_added}
 
-        return self._for_each(subject_keys, "approved", "Approving", approve)
+        return self._for_each(scan_keys, "approved", "Approving", approve)
 
     def return_all(
         self,
-        subject_keys: Iterable[str],
+        scan_keys: Iterable[str],
         to: str,
         comment: str | None = None,
         remark: str | None = None,
         revisions: dict[str, int] | None = None,
     ) -> list[dict]:
-        """Send each subject named back, as :meth:`return_case` does; one that cannot be is
+        """Send each scan named back, as :meth:`return_case` does; one that cannot be is
         reported and the rest go ahead. ``revisions`` is as for :meth:`approve_all`."""
         _check_destination(to)  # what is asked wrongly is refused before anything is sent back
         _check_comment(comment)
@@ -1851,12 +2013,12 @@ class QCStore:
             case = self.return_case(key, to, comment, remark=remark, revision=revisions.get(key))
             return {"remark_added": case.events[-1].details.get("remark_added", False)}
 
-        return self._for_each(subject_keys, "returned", "Sending back", send)
+        return self._for_each(scan_keys, "returned", "Sending back", send)
 
     def close_all(
-        self, subject_keys: Iterable[str], remark: str | None = None, revisions: dict[str, int] | None = None
+        self, scan_keys: Iterable[str], remark: str | None = None, revisions: dict[str, int] | None = None
     ) -> list[dict]:
-        """Close each subject named, as :meth:`close_case` does; one that cannot be closed is
+        """Close each scan named, as :meth:`close_case` does; one that cannot be closed is
         reported and the rest go ahead. ``revisions`` is as for :meth:`approve_all`."""
         _check_remark(remark)  # a remark too long is refused before anything is closed
         revisions = revisions or {}
@@ -1865,57 +2027,57 @@ class QCStore:
             case = self.close_case(key, remark=remark, revision=revisions.get(key))
             return {"remark_added": case.events[-1].details.get("remark_added", False)}
 
-        return self._for_each(subject_keys, "closed", "Closing", close)
+        return self._for_each(scan_keys, "closed", "Closing", close)
 
-    def _for_each(self, subject_keys: Iterable[str], done: str, doing: str, act) -> list[dict]:
-        """Do ``act`` to each subject: ``{"subject_key": ..., done: True}`` with what it returns,
+    def _for_each(self, scan_keys: Iterable[str], done: str, doing: str, act) -> list[dict]:
+        """Do ``act`` to each scan: ``{"scan_key": ..., done: True}`` with what it returns,
         or, for one it fails for, ``done: False`` with the reason, and the rest go ahead."""
         results = []
-        for key in subject_keys:
+        for key in scan_keys:
             try:
-                results.append({"subject_key": key, done: True, **act(key)})
+                results.append({"scan_key": key, done: True, **act(key)})
             except QCError as exc:
-                results.append({"subject_key": key, done: False, "message": exc.message})
-            except Exception as exc:  # the share, for one subject, need not stop the others
+                results.append({"scan_key": key, done: False, "message": exc.message})
+            except Exception as exc:  # the share, for one scan, need not stop the others
                 self.audit.event(f"{doing} {key} failed: {exc!r}", level=logging.ERROR)
-                results.append({"subject_key": key, done: False, "message": f"Could not be written: {exc}"})
+                results.append({"scan_key": key, done: False, "message": f"Could not be written: {exc}"})
         return results
 
     def return_case(
         self,
-        subject_key: str,
+        scan_key: str,
         to: str,
         comment: str | None = None,
         remark: str | None = None,
         revision: int | None = None,
     ) -> Case:
-        """Send a subject back, to the reviewers (every verdict is reviewed again) or to the
-        editors (with the administrator's word, the ``comment``). Reopens a closed subject.
-        ``remark`` is added to the subject's remarks in Subject_info at once, and nothing else is
+        """Send a scan back, to the reviewers (every verdict is reviewed again) or to the
+        editors (with the administrator's word, the ``comment``). Reopens a closed scan.
+        ``remark`` is added to the scan's remarks in scan.json at once, and nothing else is
         written; ``revision`` is as for :meth:`approve`."""
         _check_destination(to)
         comment = _check_comment(comment)
         remark = _check_remark(remark)
         with self._lock:
-            case = self._admin_case(subject_key)
+            case = self._admin_case(scan_key)
             _check_revision(case, revision, "sending it back")
-            self._applying.add(subject_key)
-            dataset_id, subject_id = case.dataset_id, case.subject_id
+            self._applying.add(scan_key)
+            dataset_id = case.dataset_id
         try:
-            remark_added = self._add_remark(dataset_id, subject_id, remark)
+            remark_added = self._add_remark(scan_key, remark)
             with self._lock:
-                case = self._cases[subject_key]
+                case = self._cases[scan_key]
                 send = workflow.return_to_review if to == workflow.REVIEW else workflow.return_to_edit
                 send(case, comment, utc_now_iso(), remark=remark, remark_added=remark_added)
                 self._save_cases()
                 snapshot = case.model_copy(deep=True)
         finally:
             with self._lock:
-                self._applying.discard(subject_key)
+                self._applying.discard(scan_key)
         self.audit.record(
             "returned",
             {
-                "subject_key": subject_key,
+                "scan_key": scan_key,
                 "to": to,
                 "stage": snapshot.stage,
                 "comment": comment,
@@ -1924,7 +2086,7 @@ class QCStore:
             },
             dataset_id=dataset_id if remark_added else None,
             summary=(
-                f"Subject {subject_key} sent back to the {'reviewers' if to == workflow.REVIEW else 'editors'} by the "
+                f"Scan {scan_key} sent back to the {'reviewers' if to == workflow.REVIEW else 'editors'} by the "
                 f"administrator; it waits for {_STAGE_WAITS_FOR[snapshot.stage]}."
                 + (f" '{remark}' added to its remarks." if remark_added else "")
                 + (f" Its remarks said '{remark}' already." if remark and not remark_added else "")
@@ -1934,32 +2096,32 @@ class QCStore:
         return snapshot
 
     def close_case(
-        self, subject_key: str, comment: str | None = None, remark: str | None = None, revision: int | None = None
+        self, scan_key: str, comment: str | None = None, remark: str | None = None, revision: int | None = None
     ) -> Case:
-        """Finish a subject's quality check without writing its labels or segmentation into the
-        dataset. ``remark`` is added to the subject's remarks in Subject_info, as for an
-        approval: how a rejected subject is recorded. The ``comment`` is kept in its history,
+        """Finish a scan's quality check without writing its labels or segmentation into the
+        dataset. ``remark`` is added to the scan's remarks in scan.json, as for an
+        approval: how a rejected scan is recorded. The ``comment`` is kept in its history,
         the remark when there is none. It is not handed out again, unless it is sent back.
         ``revision`` is as for :meth:`approve`."""
         comment = _check_comment(comment)
         remark = _check_remark(remark)
         with self._lock:
-            case = self._admin_case(subject_key)
+            case = self._admin_case(scan_key)
             _check_revision(case, revision, "closing it")
             if case.stage == workflow.CLOSED:
-                raise QCError(f"Subject {subject_key} is closed already.", status_code=409)
-            self._applying.add(subject_key)
-            dataset_id, subject_id = case.dataset_id, case.subject_id
+                raise QCError(f"Scan {scan_key} is closed already.", status_code=409)
+            self._applying.add(scan_key)
+            dataset_id = case.dataset_id
         try:
-            remark_added = self._add_remark(dataset_id, subject_id, remark)
+            remark_added = self._add_remark(scan_key, remark)
             with self._lock:
-                case = self._cases[subject_key]
+                case = self._cases[scan_key]
                 workflow.close(case, comment or remark, utc_now_iso(), remark=remark, remark_added=remark_added)
                 self._archive(case)
                 snapshot = case.model_copy(deep=True)
         finally:
             with self._lock:
-                self._applying.discard(subject_key)
+                self._applying.discard(scan_key)
         if remark_added:
             written = f"; '{remark}' added to its remarks, and nothing else written into the dataset."
         elif remark:
@@ -1968,87 +2130,83 @@ class QCStore:
             written = "; nothing was written into the dataset."
         self.audit.record(
             "closed",
-            {"subject_key": subject_key, "comment": comment, "remark": remark, "remark_added": remark_added},
+            {"scan_key": scan_key, "comment": comment, "remark": remark, "remark_added": remark_added},
             dataset_id=dataset_id if remark_added else None,
-            summary=f"Subject {subject_key} closed by the administrator{written}"
+            summary=f"Scan {scan_key} closed by the administrator{written}"
             + (f" Comment: {comment}" if comment else ""),
         )
         return snapshot
 
-    def _add_remark(self, dataset_id: int, subject_id: int, remark: str | None) -> bool:
-        """Add ``remark`` to the subject's remarks in Subject_info; False when there is none or
-        they say so already, and nothing is written."""
+    def _add_remark(self, scan_key: str, remark: str | None) -> bool:
+        """Add ``remark`` to the scan's remarks in scan.json; False when there is none or they
+        say so already, and nothing is written."""
         if remark is None:
             return False
-        added = False
-
-        def apply(subject: SubjectInfo) -> None:
-            nonlocal added
-            remarks = workflow.with_remark(subject.remarks, remark)
-            if remarks is not None:
-                subject.remarks = remarks
-                added = True
-
         with self._dataset_lock:
-            self._require_compatible_dataset(dataset_id)
-            if workflow.with_remark(self.subject_info(dataset_id, subject_id).remarks, remark) is not None:
-                self._mutate_subject_info(dataset_id, subject_id, apply)
-        return added
+            self._require_compatible_dataset(scan_ids(scan_key)[0])
+            info = self.scan_info(scan_key)
+            remarks = workflow.with_remark(info.remarks, remark)
+            if remarks is None:
+                return False
+            info.remarks = remarks
+            self._write_scan_info(scan_key, info)
+        return True
 
-    def _admin_case(self, subject_key: str) -> Case:
+    def _admin_case(self, scan_key: str) -> Case:
         """Caller holds the lock. A case the administrator may act on: not approved, not being
         approved, and not in anybody's hands."""
-        case = self._cases.get(subject_key)
+        case = self._cases.get(scan_key)
         if case is None:
-            raise QCError(f"Nobody has given a verdict on subject {subject_key} on this server.", status_code=404)
+            raise QCError(f"Nobody has given a verdict on scan {scan_key} on this server.", status_code=404)
         if case.stage == workflow.APPLIED:
-            raise QCError(f"Subject {subject_key} is approved and in the dataset already.", status_code=409)
-        if subject_key in self._applying:
-            raise QCError(f"Subject {subject_key} is being approved, closed or sent back right now.", status_code=409)
+            raise QCError(f"Scan {scan_key} is approved and in the dataset already.", status_code=409)
+        if scan_key in self._applying:
+            raise QCError(f"Scan {scan_key} is being approved, closed or sent back right now.", status_code=409)
         self._expire_stale_assignments()
         holder = next(
-            (a.user for a in self._assignments.values() if a.subject_key == subject_key and a.state == "assigned"),
+            (a.user for a in self._assignments.values() if a.scan_key == scan_key and a.state == "assigned"),
             None,
         )
         if holder is not None:
             raise QCError(
-                f"'{holder}' holds subject {subject_key} right now. Release their lease first (Assignments).",
+                f"'{holder}' holds scan {scan_key} right now. Release their lease first (Assignments).",
                 status_code=409,
             )
         return case
 
-    def _backup_destination(self, target_path: Path) -> Path:
+    def _backup_destination(self, scan_key: str) -> Path:
+        """Where the segmentation an approval replaces is kept: under the scan's path in
+        ``backups/``, named for when it was replaced."""
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_dir = self.state_dir / BACKUP_DIR_NAME / target_path.parent.parent.name
+        backup_dir = self.state_dir / BACKUP_DIR_NAME / layout.scan_key(*scan_ids(scan_key))
         backup_dir.mkdir(parents=True, exist_ok=True)
-        name = target_path.name
-        stem = name[: -len(SEGMENTATION_SUFFIX)] if name.endswith(SEGMENTATION_SUFFIX) else target_path.stem
+        stem = layout.SEGMENTATION_FILE[: -len(SEGMENTATION_SUFFIX)]
         return backup_dir / f"{stem}_{stamp}{SEGMENTATION_SUFFIX}"
 
     # ------------------------------------------------------------------ stats
     def stats(self) -> QueueStats:
-        """Where every eligible subject stands; each counts once."""
+        """Where every eligible scan stands; each counts once."""
         self._ensure_fresh_index()
         claimed_elsewhere = self._claimed_by_other_sessions()
         with self._lock:
             self._expire_stale_assignments()
             eligible = list(self._index)
-            leased = self._leased_subjects()
+            leased = self._leased_scans()
             stages = {stage: 0 for stage in (*workflow.OPEN_STAGES, *workflow.FINISHED_STAGES)}
             for case in self._cases.values():
-                if case.stage in workflow.FINISHED_STAGES or case.subject_key not in leased:
+                if case.stage in workflow.FINISHED_STAGES or case.scan_key not in leased:
                     stages[case.stage] += 1
             per_dataset: dict[int, int] = {}
             for ref in eligible:
                 per_dataset[ref.dataset_id] = per_dataset.get(ref.dataset_id, 0) + 1
-            eligible_keys = {ref.subject_key for ref in eligible}
+            eligible_keys = {ref.scan_key for ref in eligible}
             elsewhere = (claimed_elsewhere & eligible_keys) - leased
             available = len(eligible_keys - set(self._cases) - leased - elsewhere)
             built_at = self._index_built_at
-            total = self._total_subjects
+            total = self._total_scans
         return QueueStats(
-            total_subjects=total,
-            eligible_subjects=len(eligible),
+            total_scans=total,
+            eligible_scans=len(eligible),
             available=available,
             assigned=len(leased),
             assigned_by_other_servers=len(elsewhere),
@@ -2056,7 +2214,7 @@ class QCStore:
             to_edit=stages[workflow.EDIT],
             awaiting_approval=stages[workflow.APPROVAL],
             escalated=stages[workflow.ESCALATED],
-            rejected_subjects=stages[workflow.REJECTED_SUBJECT],
+            rejected_scans=stages[workflow.REJECTED_SCAN],
             applied=stages[workflow.APPLIED],
             closed=stages[workflow.CLOSED],
             datasets=dict(sorted(per_dataset.items())),
@@ -2099,17 +2257,32 @@ class ApprovalOutcome:
     """What ``QCStore.approve`` wrote into the dataset."""
 
     case: Case
-    updated_labels: dict[str, int]
+    #: What changed of the labels scan.json lists: label -> its new origin, None where taken out.
+    updated_labels: dict[str, str | None]
+    reviewed_labels: list[str]
     segmentation_written: bool
     backup_path: str | None
     message: str
     remark: str | None = None
     remark_added: bool = False
+    outdated: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass
+class _Written:
+    """What ``QCStore._write_approved`` wrote."""
+
+    origins: dict[str, str]
+    changes: dict[str, str | None]
+    result: FileFingerprint | None
+    backup_path: Path | None
+    remark_added: bool
+    outdated: dict[str, list[str]]
 
 
 # --------------------------------------------------------------------- helpers
 def _could_work_on(user: User, role: str, has_segmentation: bool) -> bool:
-    """Whether a user could do anything with a subject in this role: nobody is handed one
+    """Whether a user could do anything with a scan in this role: nobody is handed one
     they could not."""
     if role == REVIEWER:
         # A review judges a segmentation; without one there is nothing to judge.
@@ -2124,11 +2297,11 @@ def _could_work_on(user: User, role: str, has_segmentation: bool) -> bool:
 def _check_label_names(names: Iterable[str]) -> None:
     unknown = sorted({name for name in names if name not in LABEL_NAME_TO_VALUE})
     if unknown:
-        raise QCError(f"Unknown label names: {unknown}. See 'bonehub_data_schema/labelmap.py'.")
+        raise QCError(f"Unknown label names: {unknown}. See 'bonehub_format/labelmap.py'.")
 
 
 def _check_remark(remark: str | None) -> str | None:
-    """The remark as Subject_info records it (see ``workflow.tagged_remark``), or None."""
+    """The remark as scan.json records it (see ``workflow.tagged_remark``), or None."""
     if remark is not None and not isinstance(remark, str):
         raise QCError("A remark is text.")
     tagged = workflow.tagged_remark(remark)
@@ -2146,14 +2319,14 @@ def _check_comment(comment: str | None) -> str | None:
 
 def _check_destination(to: str) -> None:
     if to not in (workflow.REVIEW, workflow.EDIT):
-        raise QCError(f"A subject goes back to 'review' or to 'edit', not to '{to}'.")
+        raise QCError(f"A scan goes back to 'review' or to 'edit', not to '{to}'.")
 
 
 def _check_revision(case: Case, revision: int | None, doing: str) -> None:
     """Refuse to act on a case that changed after the administrator saw it at ``revision``."""
     if revision is not None and case.revision != revision:
         raise QCError(
-            f"Subject {case.subject_key} changed after you listed it; it now waits for "
+            f"Scan {case.scan_key} changed after you listed it; it now waits for "
             f"{_STAGE_WAITS_FOR[case.stage]}. Look at it again before {doing}.",
             status_code=409,
         )
@@ -2186,11 +2359,11 @@ def _review_message(case: Case, details: dict) -> str:
             parts.append(f"{len(details['missing'])} reported missing")
         return (
             f"Sent to the editors ({', '.join(parts) or 'as the administrator asked'}). Nothing is written into the "
-            "dataset before the administrator approves the subject."
+            "dataset before the administrator approves the scan."
         )
     if case.stage == workflow.APPROVAL:
         return (
-            f"Accepted: {len(details['accepted'])} label(s). The subject waits for the administrator's approval; "
+            f"Accepted: {len(details['accepted'])} label(s). The scan waits for the administrator's approval; "
             "nothing is written into the dataset before then."
         )
     return (
@@ -2205,8 +2378,13 @@ def _edit_message(case: Case, details: dict) -> str:
     if case.stage == workflow.REVIEW:
         return f"Uploaded. {len(details['pending'])} label(s) go to a reviewer. {kept}"
     if case.stage == workflow.APPROVAL:
-        return f"Uploaded. The corrected labels are accepted, and the subject waits for approval. {kept}"
-    return f"Uploaded. The subject waits for {_STAGE_WAITS_FOR[case.stage]}. {kept}"
+        return f"Uploaded. The corrected labels are accepted, and the scan waits for approval. {kept}"
+    return f"Uploaded. The scan waits for {_STAGE_WAITS_FOR[case.stage]}. {kept}"
+
+
+def _outdated_text(outdated: dict[str, list[str]]) -> str:
+    """The mesh and NURBS files an approval left out of date, in words."""
+    return " and ".join(f"the {kind} of {', '.join(labels)}" for kind, labels in sorted(outdated.items()))
 
 
 def _verdicts_of(case: Case) -> dict[str, dict]:
@@ -2255,7 +2433,7 @@ def _account(user: User) -> str:
 
 
 def _seen(user: User) -> str:
-    """Audit note on what a verdict was based on, when that was less than the whole subject."""
+    """Audit note on what a verdict was based on, when that was less than the whole scan."""
     if user.data_access == DEFAULT_DATA_ACCESS:
         return ""
     return f" The user is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}."
@@ -2297,6 +2475,30 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _restamped(fingerprint: FileFingerprint | None, path: Path) -> FileFingerprint | None:
+    """A fingerprint of a file known to have the fingerprinted content, with the file's time now."""
+    if fingerprint is None:
+        return None
+    try:
+        return fingerprint.model_copy(update={"mtime_ns": path.stat().st_mtime_ns})
+    except FileNotFoundError:
+        return None
+
+
+def _write_metadata(path: Path, data: dict) -> None:
+    """Write a metadata file of the BoneHub format -- as ``bonehub_format`` writes it, byte for
+    byte -- through a temporary file in its folder, so a crash cannot truncate the original."""
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+            f.write("\n")
+        _replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _atomic_write_json(path: Path, payload) -> None:
     """Write JSON through a temporary file so a crash cannot truncate the original."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2325,6 +2527,49 @@ def _replace(source: Path, target: Path) -> None:
         except PermissionError:
             time.sleep(delay)
     os.replace(source, target)
+
+
+def _scan_folders(dataset_dir: Path):
+    """``(subject_id, scan_id, folder)`` of each scan folder of a dataset folder, in order: the
+    folders named as the BoneHub format names them (sub-NNNNNN/scan-NN)."""
+    with os.scandir(dataset_dir) as subjects:
+        subject_dirs = sorted(
+            (subject_id, Path(entry.path))
+            for entry in subjects
+            if (subject_id := layout.parse_subject_dir(entry.name)) is not None and entry.is_dir()
+        )
+    for subject_id, subject_dir in subject_dirs:
+        with os.scandir(subject_dir) as scans:
+            scan_dirs = sorted(
+                (scan_id, Path(entry.path))
+                for entry in scans
+                if (scan_id := layout.parse_scan_dir(entry.name)) is not None and entry.is_dir()
+            )
+        for scan_id, scan_dir in scan_dirs:
+            yield subject_id, scan_id, scan_dir
+
+
+def _check_state_format(state_dir: Path) -> None:
+    """Refuse a server folder kept for another major version of the BoneHub format: its cases and
+    assignments name scans -- or, before version 1, subjects -- of another layout."""
+    session = _read_json(state_dir / SESSION_FILE_NAME)
+    recorded = session.get("schema_version") if isinstance(session, dict) else None
+    older = recorded is not None and str(recorded).split(".")[0] != SCHEMA_VERSION.split(".")[0]
+    if not older:
+        # A folder whose session.json says nothing: its cases tell, by how they name what they are about.
+        for name in (CASES_FILE_NAME, ASSIGNMENTS_FILE_NAME):
+            entries = _read_json(state_dir / name)
+            if isinstance(entries, list) and any(isinstance(e, dict) and "subject_key" in e for e in entries):
+                older, recorded = True, recorded or "0.x"
+                break
+    if older:
+        raise RuntimeError(
+            f"This server's folder '{state_dir}' holds a quality check of a dataset in version {recorded} of the "
+            f"BoneHub data format, but this server (version {SERVER_VERSION}) works on version {SCHEMA_VERSION}, "
+            "whose datasets are laid out differently. Finish that quality check with the version of the server it "
+            f"was made with. Then move the folder out of '{state_dir.parent}', keeping it as its history, and start "
+            "this server again: it begins a new folder, with the same users and keys."
+        )
 
 
 def _read_json(path: Path):

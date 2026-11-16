@@ -38,7 +38,7 @@ class AdminAuthTests(ApiTestCase):
         body = self.client.get("/admin/api/session", headers=self.admin_headers).json()
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["dataset_root"], str(self.dataset_root))
-        self.assertEqual(body["config"]["eligible_label_values"], [1])
+        self.assertEqual(body["config"]["eligible_review_states"], ["not_reviewed"])
         self.assertEqual(body["server_id"], "qc_test_server")
         self.assertEqual([session["server_id"] for session in body["sessions"]], ["qc_test_server"])
 
@@ -146,7 +146,7 @@ class AdminUserManagementTests(ApiTestCase):
 
     def test_the_user_list_shows_progress_per_user(self):
         self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"])
-        self.next_subject(self.bob_key, "editor")
+        self.next_scan(self.bob_key, "editor")
 
         listed = {u["name"]: u for u in self.client.get("/admin/api/users", headers=self.admin_headers).json()}
         self.assertEqual((listed["alice"]["reviewed"], listed["alice"]["edited"], listed["alice"]["open"]), (1, 0, 0))
@@ -156,15 +156,15 @@ class AdminUserManagementTests(ApiTestCase):
 class AdminMonitoringTests(ApiTestCase):
     def test_stats_report_the_queue(self):
         body = self.client.get("/admin/api/stats", headers=self.admin_headers).json()
-        self.assertEqual(body["total_subjects"], 3)
-        self.assertEqual(body["eligible_subjects"], 3)
+        self.assertEqual(body["total_scans"], 3)
+        self.assertEqual(body["eligible_scans"], 3)
         self.assertEqual(body["available"], 3)
         self.assertEqual(body["datasets"], {"1": 3})
 
     def test_assignments_can_be_listed_and_filtered(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         self.submit(self.alice_key, handout["assignment_id"], False)
-        self.next_subject(self.bob_key)
+        self.next_scan(self.bob_key)
 
         everything = self.client.get("/admin/api/assignments", headers=self.admin_headers).json()
         self.assertEqual(len(everything), 2)
@@ -172,12 +172,12 @@ class AdminMonitoringTests(ApiTestCase):
         self.assertEqual([(a["user"], a["role"], a["stage_after"]) for a in submitted], [("alice", "reviewer", "rejected")])
 
     def test_an_administrator_can_take_a_subject_back_from_a_reviewer(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.client.post(
             f"/admin/api/assignments/{handout['assignment_id']}/release", headers=self.admin_headers
         )
         self.assertEqual(response.json()["state"], "released")
-        self.assertEqual(self.next_subject(self.bob_key)["subject_key"], handout["subject_key"])
+        self.assertEqual(self.next_scan(self.bob_key)["scan_key"], handout["scan_key"])
 
     def test_submissions_are_readable_from_the_panel(self):
         self.judge(self.alice_key, comment="clean")
@@ -188,9 +188,9 @@ class AdminMonitoringTests(ApiTestCase):
         self.assertEqual(entries[0]["comment"], "clean")
 
     def test_the_index_can_be_rebuilt_on_demand(self):
-        self.builder.add_subject(1, 99, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 99, segmentation=["FEMUR_LEFT"])
         body = self.client.post("/admin/api/refresh-index", headers=self.admin_headers).json()
-        self.assertEqual(body["eligible_subjects"], 4)
+        self.assertEqual(body["eligible_scans"], 4)
 
 
 class AdminConfigTests(ApiTestCase):
@@ -210,14 +210,14 @@ class AdminConfigTests(ApiTestCase):
         self.assertEqual(QCServerConfig.load(self.state_dir / "config.json").lease_ttl_seconds, 300)
 
     def test_a_policy_change_takes_effect_at_once(self):
-        """Narrowing the eligible statuses must re-scope the queue immediately."""
-        self.client.put("/admin/api/config", json={"eligible_label_values": [2]}, headers=self.admin_headers)
-        self.assertEqual(self.client.get("/admin/api/stats", headers=self.admin_headers).json()["eligible_subjects"], 0)
-        self.assertEqual(self.client.post("/api/v1/subjects/next", headers=self.headers(self.alice_key)).status_code,
+        """Narrowing the labels the server queues must re-scope the queue immediately."""
+        self.client.put("/admin/api/config", json={"eligible_review_states": ["reviewed"]}, headers=self.admin_headers)
+        self.assertEqual(self.client.get("/admin/api/stats", headers=self.admin_headers).json()["eligible_scans"], 0)
+        self.assertEqual(self.client.post("/api/v1/scans/next", headers=self.headers(self.alice_key)).status_code,
                          404)
 
     def test_restricting_the_served_datasets_at_runtime_works(self):
-        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(2, 1, segmentation=["FEMUR_LEFT"])
         self.client.post("/admin/api/refresh-index", headers=self.admin_headers)
         self.assertEqual(
             sorted(self.client.get("/admin/api/stats", headers=self.admin_headers).json()["datasets"]), ["1", "2"]
@@ -231,12 +231,23 @@ class AdminConfigTests(ApiTestCase):
         response = self.client.put("/admin/api/config", json={"nonsense": 1}, headers=self.admin_headers)
         self.assertEqual(response.status_code, 400)
 
-    def test_an_invalid_label_status_is_refused(self):
-        for statuses in ([3], [0], [42]):
-            response = self.client.put(
-                "/admin/api/config", json={"eligible_label_values": statuses}, headers=self.admin_headers
-            )
-            self.assertEqual(response.status_code, 400, statuses)
+    def test_an_invalid_review_state_or_origin_is_refused(self):
+        for change in (
+            {"eligible_review_states": ["half_reviewed"]},
+            {"eligible_review_states": []},
+            {"eligible_origins": ["models"]},
+            {"eligible_origins": []},
+        ):
+            response = self.client.put("/admin/api/config", json=change, headers=self.admin_headers)
+            self.assertEqual(response.status_code, 400, change)
+        self.assertEqual(self.store.config.eligible_review_states, ["not_reviewed"], "nothing was changed")
+
+    def test_the_settings_of_the_label_statuses_are_gone(self):
+        """A panel or script written for the schema-0.3 server is told so, rather than half obeyed."""
+        for name in ("eligible_label_values", "mark_removed_labels_absent", "include_subjects_without_segmentation"):
+            response = self.client.put("/admin/api/config", json={name: [1]}, headers=self.admin_headers)
+            self.assertEqual(response.status_code, 400, name)
+            self.assertIn("Unknown configuration fields", response.json()["detail"])
 
 
 if __name__ == "__main__":

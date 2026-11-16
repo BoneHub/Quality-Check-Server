@@ -1,15 +1,15 @@
 """A study's results: the numbers, the figures, the report, and the CSV files.
 
-* **Items** are the bones of the study's subjects, each judged accept or reject. A reading that
-  rejects the subject as a whole gives each of its bones a third verdict, ``subject_rejected``:
-  a rejected bone can be corrected, a rejected subject is not used at all, so the two disagree.
+* **Items** are the bones of the study's scans, each judged accept or reject. A reading that
+  rejects the scan as a whole gives each of its bones a third verdict, ``scan_rejected``:
+  a rejected bone can be corrected, a rejected scan is not used at all, so the two disagree.
 * **Intra-rater**: each rater's readings of an item, compared with each other, for each rater
   and for all of them together (every rater's items side by side).
 * **Inter-rater**: the raters' first readings of an item, for each pair of raters and for all
   of them together. Later readings are the rater's second look, so they are left out here.
 
 Each comparison gets % agreement, Krippendorff's alpha and Gwet's AC1, with 95% intervals from
-resampling the subjects (see :mod:`.reliability`), drawn with the study's seed, so the same
+resampling the scans (see :mod:`.reliability`), drawn with the study's seed, so the same
 readings always give the same numbers.
 
 Codes stand for the raters everywhere; no file made here names one. The figures are drawn
@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .. import __version__
-from .models import REJECT, SUBJECT_REJECTED, VERDICTS, Reading, Study
+from .models import REJECT, SCAN_REJECTED, VERDICTS, Reading, Study
 from .reliability import Agreement, Estimate, agreement
 
 # Chart colours: one categorical hue for the marks, one blue ramp for magnitude, and inks and
@@ -108,31 +108,31 @@ def compute_results(study: Study, readings: list[Reading]) -> Results:
         progress=[Progress(rater.code, done.get(rater.code, 0), len(rater.order)) for rater in raters],
     )
 
-    units = [(subject.subject_key, bone) for subject in study.subjects for bone in subject.bones]
+    units = [(scan.scan_key, bone) for scan in study.scans for bone in scan.bones]
     unit_index = {unit: index for index, unit in enumerate(units)}
-    subject_index = {subject.subject_key: index for index, subject in enumerate(study.subjects)}
-    subject_of_unit = np.array([subject_index[key] for key, _ in units], dtype=int)
-    verdicts_of = {(reading.code, reading.subject_key, reading.reading): counted_verdicts(reading) for reading in readings}
+    scan_index = {scan.scan_key: index for index, scan in enumerate(study.scans)}
+    scan_of_unit = np.array([scan_index[key] for key, _ in units], dtype=int)
+    verdicts_of = {(reading.code, reading.scan_key, reading.reading): counted_verdicts(reading) for reading in readings}
 
     def counts(sources: list[tuple[str, int]]) -> np.ndarray:
         """Per item, how many of these readings (code, reading number) give it each verdict."""
         table = np.zeros((len(units), len(VERDICTS)))
         for code, number in sources:
-            for subject in study.subjects:
-                verdicts = verdicts_of.get((code, subject.subject_key, number))
+            for scan in study.scans:
+                verdicts = verdicts_of.get((code, scan.scan_key, number))
                 for bone, verdict in (verdicts or {}).items():
-                    if (subject.subject_key, bone) in unit_index:
-                        table[unit_index[(subject.subject_key, bone)], VERDICTS.index(verdict)] += 1
+                    if (scan.scan_key, bone) in unit_index:
+                        table[unit_index[(scan.scan_key, bone)], VERDICTS.index(verdict)] += 1
         return table
 
     settings = study.settings
     analyses = 0
 
-    def measure(table: np.ndarray, subjects: np.ndarray = subject_of_unit) -> Agreement:
+    def measure(table: np.ndarray, scans: np.ndarray = scan_of_unit) -> Agreement:
         nonlocal analyses
         analyses += 1
         rng = np.random.default_rng([settings.seed, analyses])
-        return agreement(table, subjects, settings.bootstrap_samples, rng)
+        return agreement(table, scans, settings.bootstrap_samples, rng)
 
     repeats: dict[str, np.ndarray] = {}
     if settings.readings_per_rater >= 2:
@@ -144,17 +144,17 @@ def compute_results(study: Study, readings: list[Reading]) -> Results:
     if len(codes) >= 2:
         results.group = measure(counts([(code, 1) for code in codes]))
     if repeats and len(codes) >= 2:
-        # Every rater's items one after another, each with its subject, so that a resample draws
-        # a subject with every rater's readings of it.
-        results.intra_group = measure(np.vstack([repeats[code] for code in codes]), np.tile(subject_of_unit, len(codes)))
+        # Every rater's items one after another, each with its scan, so that a resample draws
+        # a scan with every rater's readings of it.
+        results.intra_group = measure(np.vstack([repeats[code] for code in codes]), np.tile(scan_of_unit, len(codes)))
     return results
 
 
 def counted_verdicts(reading: Reading) -> dict[str, str]:
-    """Each bone's verdict as the statistics count it: ``subject_rejected`` for every bone of a
-    reading that rejected the subject as a whole."""
-    if reading.subject_rejected:
-        return dict.fromkeys(reading.verdicts, SUBJECT_REJECTED)
+    """Each bone's verdict as the statistics count it: ``scan_rejected`` for every bone of a
+    reading that rejected the scan as a whole."""
+    if reading.scan_rejected:
+        return dict.fromkeys(reading.verdicts, SCAN_REJECTED)
     return dict(reading.verdicts)
 
 
@@ -199,25 +199,25 @@ def results_zip(files: ReportFiles) -> bytes:
 # ----------------------------------------------------------------------- CSV
 def readings_csv(study: Study, readings: list[Reading]) -> str:
     """One row per bone per reading, with the rater's code in place of their name, and the
-    verdict as the statistics count it: accept, reject, or subject_rejected."""
+    verdict as the statistics count it: accept, reject, or scan_rejected."""
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(
         [
-            "rater", "subject", "reading", "position", "bone", "verdict", "handed_out_at", "submitted_at",
+            "rater", "scan", "reading", "position", "bone", "verdict", "handed_out_at", "submitted_at",
             "comment",
         ]
     )  # fmt: skip
-    bones_of = {subject.subject_key: subject.bones for subject in study.subjects}
+    bones_of = {scan.scan_key: scan.bones for scan in study.scans}
     for reading in sorted(readings, key=lambda r: (_code_order(r.code), r.position)):
         verdicts = counted_verdicts(reading)
-        for bone in bones_of.get(reading.subject_key, sorted(verdicts)):
+        for bone in bones_of.get(reading.scan_key, sorted(verdicts)):
             if bone not in verdicts:
                 continue
             writer.writerow(
                 [
                     reading.code,
-                    reading.subject_key,
+                    reading.scan_key,
                     reading.reading,
                     reading.position,
                     bone,
@@ -236,7 +236,7 @@ def results_csv(results: Results) -> str:
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(
         [
-            "comparison", "raters", "subjects", "items", "verdicts", "rejected_percent",
+            "comparison", "raters", "scans", "items", "verdicts", "rejected_percent",
             "subject_rejected_percent", "agreement_percent", "agreement_low", "agreement_high",
             "alpha", "alpha_low", "alpha_high", "ac1", "ac1_low", "ac1_high",
         ]
@@ -256,11 +256,11 @@ def results_csv(results: Results) -> str:
             [
                 comparison,
                 raters,
-                found.subjects,
+                found.scans,
                 found.items,
                 found.values,
                 number(_share(found, REJECT), 100),
-                number(_share(found, SUBJECT_REJECTED), 100),
+                number(_share(found, SCAN_REJECTED), 100),
                 number(found.agreement.value, 100),
                 number(found.agreement.low, 100),
                 number(found.agreement.high, 100),
@@ -282,12 +282,12 @@ def _share(found: Agreement, verdict: str) -> float | None:
 
 # ------------------------------------------------------------------- figures
 def _intra_measured(results: Results) -> bool:
-    """Some rater has read a subject twice."""
+    """Some rater has read a scan twice."""
     return any(found.items for _, found in results.intra)
 
 
 def _inter_measured(results: Results) -> bool:
-    """Some subject has been read by two raters."""
+    """Some scan has been read by two raters."""
     return results.group is not None and results.group.items > 0
 
 
@@ -535,8 +535,8 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
         if final
         else f"Provisional: the study is still running, with {done} of {planned} readings done."
     )
-    bones = [len(subject.bones) for subject in study.subjects]
-    subjects = ", ".join(e(subject.subject_key) for subject in study.subjects)
+    bones = [len(scan.bones) for scan in study.scans]
+    scans = ", ".join(e(scan.scan_key) for scan in study.scans)
 
     parts = [
         "<!doctype html>",
@@ -549,26 +549,26 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
         f'<p class="status{"" if final else " provisional"}">{status}</p>',
         "<h2>Study</h2>",
         "<table class=\"facts\"><tbody>",
-        _fact("Subjects", f"{len(study.subjects)} <details><summary>list</summary>{subjects}</details>"),
+        _fact("Scans", f"{len(study.scans)} <details><summary>list</summary>{scans}</details>"),
         _fact(
             "Items (bones)",
             (
-                f"{sum(bones)}, {min(bones)}{'' if min(bones) == max(bones) else f'–{max(bones)}'} per subject"
+                f"{sum(bones)}, {min(bones)}{'' if min(bones) == max(bones) else f'–{max(bones)}'} per scan"
                 if bones
                 else "0"
             ),
         ),
         _fact("Raters", f"{len(results.codes)}: {', '.join(results.codes)}"),
-        _fact("Readings per rater", f"{settings.readings_per_rater} of each subject"),
+        _fact("Readings per rater", f"{settings.readings_per_rater} of each scan"),
         _fact(
             "Minimum gap",
             (
-                f"{study.min_gap} other readings between two readings of one subject"
+                f"{study.min_gap} other readings between two readings of one scan"
                 if settings.readings_per_rater >= 2
-                else "not applicable: one reading of each subject"
+                else "not applicable: one reading of each scan"
             ),
         ),
-        _fact("Subject ids shown to raters", "yes" if settings.show_subject_id else "no"),
+        _fact("Scan ids shown to raters", "yes" if settings.show_scan_id else "no"),
         _fact("Seed", str(settings.seed)),
         _fact("Bootstrap samples", f"{settings.bootstrap_samples} per interval"),
         _fact("Started", e(_time(study.started_at))),
@@ -601,13 +601,13 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
             _agreement_table(_intra_rows(results), "Raters"),
         ]
     elif results.intra:
-        parts.append("<p>Nothing to compare yet: no rater has read a subject twice.</p>")
+        parts.append("<p>Nothing to compare yet: no rater has read a scan twice.</p>")
     else:
-        parts.append("<p>Not measured: each rater read each subject once.</p>")
+        parts.append("<p>Not measured: each rater read each scan once.</p>")
 
     parts.append("<h2>Inter-rater reliability</h2>")
     if results.group is not None and not _inter_measured(results):
-        parts.append("<p>Nothing to compare yet: no subject has been read by two raters.</p>")
+        parts.append("<p>Nothing to compare yet: no scan has been read by two raters.</p>")
     elif results.group is not None:
         parts += [
             "<p>Do the raters agree with each other? Their first readings of each bone, compared. "
@@ -650,13 +650,13 @@ def report_html(results: Results, figures: dict[str, tuple[bytes, bytes]], gener
 
 _METHOD = """
 <ul class="method">
-<li><b>What was judged.</b> Every bone of every study subject, at each reading: <i>accept</i>, <i>reject</i>,
-or <i>subject rejected</i> when the rater rejected the whole subject. A rejected subject is a verdict of its
-own, not a reject of each bone: a rejected bone can be corrected, a rejected subject is not used at all. So a
-rater who rejects every bone and one who rejects the subject disagree on each bone. The <i>Items</i> in the
+<li><b>What was judged.</b> Every bone of every study scan, at each reading: <i>accept</i>, <i>reject</i>,
+or <i>scan rejected</i> when the rater rejected the whole scan. A rejected scan is a verdict of its
+own, not a reject of each bone: a rejected bone can be corrected, a rejected scan is not used at all. So a
+rater who rejects every bone and one who rejects the scan disagree on each bone. The <i>Items</i> in the
 tables are these bones.</li>
-<li><b>Intra-rater: does a rater agree with themselves?</b> Each rater read the same subjects more than once,
-with other subjects in between. Their readings of each bone are compared, for each rater, which shows who is
+<li><b>Intra-rater: does a rater agree with themselves?</b> Each rater read the same scans more than once,
+with other scans in between. Their readings of each bone are compared, for each rater, which shows who is
 less consistent, and for all raters together, which gives one result for the whole team.</li>
 <li><b>Inter-rater: do the raters agree with each other?</b> Their first readings of each bone are compared,
 for each pair of raters, which shows who disagrees with whom, and for all raters together, which gives one
@@ -675,19 +675,19 @@ still agree on most bones. So agreeing on accepts counts for little, and a few d
 rejects pull α down a lot. For example, at 95% agreement with 5% of verdicts rejects, AC1 is 0.95 but α is
 0.47. α is shown because it is the best-known measure. It is <i>n/a</i> when every verdict was the same, as
 nothing then tells agreement from luck.</li>
-<li><b>Rejected</b> and <b>Subject rejected</b> (in the tables): the share of verdicts that rejected a bone,
-and that rejected the whole subject, counted per bone. The rarer they are, the further apart AC1 and α can
+<li><b>Rejected</b> and <b>Scan rejected</b> (in the tables): the share of verdicts that rejected a bone,
+and that rejected the whole scan, counted per bone. The rarer they are, the further apart AC1 and α can
 be.</li>
-<li><b>95% interval: how sure each number is.</b> With other subjects, the numbers would come out slightly
+<li><b>95% interval: how sure each number is.</b> With other scans, the numbers would come out slightly
 different. The interval is the range the true value very likely lies in: a narrow one can be trusted, a wide
-one means more subjects are needed. It comes from reshuffling the study's own subjects into many pretend
-studies (see <i>Bootstrap samples</i> above), some subjects drawn twice and some not at all, and keeping the
-middle 95% of the results. Whole subjects are drawn, since the bones of one scan tend to be judged together.
+one means more scans are needed. It comes from reshuffling the study's own scans into many pretend
+studies (see <i>Bootstrap samples</i> above), some scans drawn twice and some not at all, and keeping the
+middle 95% of the results. Whole scans are drawn, since the bones of one scan tend to be judged together.
 The draws use the study's seed, so the same readings always give the same intervals.</li>
 </ul>
 <p class="foot">Technical details: % agreement is Gwet's p<sub>a</sub>; α is Krippendorff's alpha for nominal
 data (Krippendorff 2011); AC1 is Gwet's AC1 (Gwet 2008); intervals are percentile bootstrap intervals,
-resampling subjects with replacement.</p>
+resampling scans with replacement.</p>
 """
 
 _CSS = """
@@ -774,16 +774,16 @@ def _tiles(found: Agreement) -> str:
 
 def _agreement_table(rows: list[tuple[str, Agreement]], first: str) -> str:
     head = (
-        f"<tr><th>{html.escape(first)}</th><th class=\"num\">Subjects</th><th class=\"num\">Items</th>"
-        '<th class="num">Rejected</th><th class="num">Subject rejected</th><th class="num">% agreement</th>'
+        f"<tr><th>{html.escape(first)}</th><th class=\"num\">Scans</th><th class=\"num\">Items</th>"
+        '<th class="num">Rejected</th><th class="num">Scan rejected</th><th class="num">% agreement</th>'
         '<th class="num">95% interval</th>'
         '<th class="num">α</th><th class="num">95% interval</th><th class="num">AC1</th>'
         '<th class="num">95% interval</th></tr>'
     )
     body = "".join(
-        f"<tr><td>{html.escape(label)}</td><td class=\"num\">{found.subjects}</td><td class=\"num\">{found.items}</td>"
+        f"<tr><td>{html.escape(label)}</td><td class=\"num\">{found.scans}</td><td class=\"num\">{found.items}</td>"
         f"<td class=\"num\">{_percent(_share(found, REJECT))}</td>"
-        f"<td class=\"num\">{_percent(_share(found, SUBJECT_REJECTED))}</td>"
+        f"<td class=\"num\">{_percent(_share(found, SCAN_REJECTED))}</td>"
         f"<td class=\"num\">{_value(found.agreement, True)}</td><td class=\"num\">{_interval(found.agreement, True)}</td>"
         f"<td class=\"num\">{_value(found.alpha, False)}</td><td class=\"num\">{_interval(found.alpha, False)}</td>"
         f"<td class=\"num\">{_value(found.ac1, False)}</td><td class=\"num\">{_interval(found.ac1, False)}</td></tr>"

@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from bonehub_data_schema import __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION
 
 from .. import __version__, admin, auth, review
 from ..config import STUDY_MODE, STUDY_STATE_DIR_NAME, QCServerConfig, resolve_credentials_dir, resolve_dataset_root
@@ -40,7 +40,7 @@ def create_study_app(
         title="BoneHub Quality Check · reliability study",
         version=__version__,
         description=(
-            "A reliability study of the reviewers: raters judge the same subjects, each several times, on the "
+            "A reliability study of the reviewers: raters judge the same scans, each several times, on the "
             "browser review page, and the server measures how far their verdicts agree. It never writes into the "
             "dataset."
         ),
@@ -99,7 +99,7 @@ def _announce(app: FastAPI) -> None:
         f"state folder : {store.state_dir} (inside the container, never in the dataset)",
         f"users        : {len(store.list_users())}",
         "study        : " + (f"'{study.settings.name}', {study.state}" if study else "none set up yet"),
-        f"data schema  : {SCHEMA_VERSION}",
+        f"data format  : BoneHub {SCHEMA_VERSION}",
     ]
     lines = [
         "BoneHub Quality Check -- reliability study server",

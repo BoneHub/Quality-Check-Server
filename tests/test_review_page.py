@@ -51,7 +51,7 @@ class ServedFilesTests(ApiTestCase):
 
     def test_the_page_needs_no_key_but_everything_it_fetches_does(self):
         self.assertEqual(self.client.get("/review").status_code, 200)
-        self.assertEqual(self.client.post("/api/v1/subjects/next").status_code, 401)
+        self.assertEqual(self.client.post("/api/v1/scans/next").status_code, 401)
 
     def test_the_script_is_served_as_javascript(self):
         """A module script served as text/plain is refused by the browser."""
@@ -153,7 +153,7 @@ class PageContractTests(unittest.TestCase):
 
     def test_the_admin_panel_filters_and_acts_with_the_names_the_server_reads(self):
         page = self.read("admin.html")
-        for name in ('"&comment="', "subject_keys:", "remark:", "allow_unaccepted:", "revisions:", "to:", "comment:"):
+        for name in ('"&comment="', "scan_keys:", "remark:", "allow_unaccepted:", "revisions:", "to:", "comment:"):
             self.assertIn(name, page)
 
 
@@ -209,7 +209,7 @@ class SegmentTableTests(QCTestCase):
 
 class HandoutSegmentTests(ApiTestCase):
     def test_the_handout_carries_the_segment_table(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         self.assertEqual([s["label"] for s in handout["segments"]], ["FEMUR_LEFT", "FEMUR_RIGHT"])
         first = handout["segments"][0]
         self.assertEqual(set(first), {"number", "label", "value", "color", "extent"})
@@ -222,7 +222,7 @@ class HandoutSegmentTests(ApiTestCase):
         numbers = np.zeros((6, 6, 6), dtype=np.uint8)
         numbers[0, 0:2, 0:2] = 1
         write_raw_mask(self.builder.segmentation_file(1, 1), numbers, segment_header((1, "NOT_A_BONE", None)))
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         self.assertTrue(handout["has_segmentation"])
         self.assertEqual(handout["segments"], [])
         self.assertIn("segment table", (self.state_dir / "server.log").read_text(encoding="utf-8"))

@@ -19,34 +19,34 @@ from unittest import mock
 import numpy as np
 import SimpleITK as sitk
 
-from bonehub_data_schema import read_segmentation_labels
+from bonehub_format import read_segmentation_labels
 from qc_server import store as store_module
 from qc_server import workflow
 from qc_server.models import EDITOR, REVIEWER, Case, CaseLabel
 from qc_server.store import QCError
 
-from tests.support import LABEL_VALUE, QCTestCase, labels_in_mask, segment_header, write_image, write_mask, write_raw_mask
+from tests.support import LABEL_VALUE, QCTestCase, labels_in_mask, segment_header, write_image, write_raw_mask
 
-KEY = "001_000001"
+KEY = "ds-0001/sub-000001/scan-01"
 
 
 class EditorTestCase(QCTestCase):
-    """A subject a reviewer sent back, in an editor's hands: rita rejected the right femur,
-    and alice holds the subject in 3D Slicer."""
+    """A scan a reviewer sent back, in an editor's hands: rita rejected the right femur,
+    and alice holds the scan in 3D Slicer."""
 
     config: dict = {}
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.store = self.make_store(**self.config)
         self.rita = self.store.create_user("rita", roles=[REVIEWER])[0]
         self.alice = self.store.create_user("alice", roles=[EDITOR])[0]
         self.bob = self.store.create_user("bob", roles=[EDITOR])[0]
         self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
-        self.assignment = self.store.next_subject(self.alice, EDITOR)
+        self.assignment = self.store.next_scan(self.alice, EDITOR)
         self.before = self.dataset_state()
-        self.staged = self.state_dir / "staged" / "Dataset_001" / f"{KEY}.seg.nrrd"
+        self.staged = self.state_dir / "staged" / KEY / "segmentation.seg.nrrd"
 
     def submit(self, upload, **kwargs):
         return self.store.submit(self.assignment.assignment_id, self.alice, True, upload, **kwargs)
@@ -88,44 +88,127 @@ class StagedCorrectionTests(EditorTestCase):
         self.assert_dataset_untouched()
 
 
-class StatusesOnApprovalTests(QCTestCase):
-    """An accepted label always ends at status 2 once approved, whatever status it started from."""
+class OriginsOnApprovalTests(QCTestCase):
+    """What an approval records of each label: its origin in scan.json, and whether it is reviewed.
 
-    def approve(self, segmentation: dict, painted: list, accepted=None) -> tuple:
-        self.builder.add_subject(1, 1, segmentation=segmentation, write_segmentation_file=False)
-        write_mask(self.builder.segmentation_file(1, 1), painted)
-        store = self.make_store(eligible_label_values=[1, 2])
-        rita = store.create_user("rita", roles=[REVIEWER])[0]
-        self.review(store, rita, accepted=accepted)
-        outcome = store.approve(KEY)
-        return self.builder.subject_info(1, 1)["segmentation"], outcome
+    A label an editor drew or changed is manual; any other keeps the origin it had. A label a
+    reviewer accepted becomes reviewed; one reviewed already stays so while nobody redraws it.
+    """
 
-    def test_an_already_reviewed_label_stays_reviewed(self):
-        stored, _ = self.approve({"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1}, ["FEMUR_LEFT", "FEMUR_RIGHT"])
-        self.assertEqual(stored, {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
-
-    def test_a_label_recorded_as_not_available_but_painted_and_accepted_is_reviewed(self):
-        stored, _ = self.approve({"FEMUR_LEFT": 1, "SACRUM": 0}, ["FEMUR_LEFT", "SACRUM"])
-        self.assertEqual(stored["SACRUM"], 2)
-
-    def test_a_label_already_not_available_is_left_alone(self):
-        stored, outcome = self.approve({"FEMUR_LEFT": 1, "SACRUM": 0}, ["FEMUR_LEFT"])
-        self.assertNotIn("SACRUM", outcome.updated_labels)
-        self.assertEqual(stored, {"FEMUR_LEFT": 2, "SACRUM": 0})
-
-    def test_a_painted_label_listed_as_not_available_that_nobody_accepted_is_recorded_as_not_reviewed(self):
-        """Painted means available: status 0 would contradict the file."""
-        case = Case(
-            subject_key=KEY,
-            dataset_id=1,
-            subject_id=1,
-            stage="approval",
-            labels={"FEMUR_LEFT": CaseLabel(state="accepted"), "SACRUM": CaseLabel(state="kept")},
-            created_at="2026-01-01T00:00:00Z",
-            updated_at="2026-01-01T00:00:00Z",
+    def setUp(self) -> None:
+        super().setUp()
+        self.builder.add_scan(
+            1, 1, segmentation={"FEMUR_LEFT": "source", "FEMUR_RIGHT": "model:TotalSegmentator@2.4.0"},
+            reviewed=["FEMUR_LEFT"],
         )
-        updates = workflow.approval_statuses(case, {"FEMUR_LEFT": 1, "SACRUM": 0}, mark_removed_absent=True)
-        self.assertEqual(updates, {"FEMUR_LEFT": 2, "SACRUM": 1})
+        self.store = self.make_store(eligible_review_states=["not_reviewed", "reviewed"])
+        self.rita = self.store.create_user("rita", roles=[REVIEWER])[0]
+        self.eddie = self.store.create_user("eddie", roles=[EDITOR])[0]
+
+    def test_an_accepted_label_keeps_its_origin_and_becomes_reviewed(self):
+        self.review(self.store, self.rita)
+        outcome = self.store.approve(KEY)
+        self.assertEqual(outcome.updated_labels, {})
+        self.assertEqual(outcome.reviewed_labels, ["FEMUR_LEFT", "FEMUR_RIGHT"])
+        self.assertEqual(
+            self.builder.origins(1, 1), {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "model:TotalSegmentator@2.4.0"}
+        )
+        self.assertEqual(self.reviewed(self.store), {"FEMUR_LEFT", "FEMUR_RIGHT"})
+
+    def test_a_label_an_editor_redrew_is_manual(self):
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        self.review(self.store, self.rita)
+        outcome = self.store.approve(KEY)
+        self.assertEqual(outcome.updated_labels, {"FEMUR_RIGHT": "manual"})
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "manual"})
+        self.assertEqual(self.reviewed(self.store), {"FEMUR_LEFT", "FEMUR_RIGHT"})
+
+    def test_a_rejected_label_the_editor_left_as_it_was_keeps_its_origin(self):
+        """The editor looked at it and found nothing to change: the voxels are still the model's."""
+        self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"])
+        self.assertEqual(self.store.case_of(KEY).labels["FEMUR_RIGHT"].edited_by, "eddie")
+        self.review(self.store, self.rita)
+        self.store.approve(KEY)
+        self.assertEqual(self.builder.origins(1, 1)["FEMUR_RIGHT"], "model:TotalSegmentator@2.4.0")
+
+    def test_a_label_an_editor_added_is_manual(self):
+        self.review(self.store, self.rita, missing=["SACRUM"])
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT", "SACRUM"])
+        self.review(self.store, self.rita)
+        self.store.approve(KEY)
+        self.assertEqual(self.builder.origins(1, 1)["SACRUM"], "manual")
+        self.assertIn("SACRUM", self.reviewed(self.store))
+
+    def test_a_redrawn_label_nobody_accepted_is_manual_but_not_reviewed(self):
+        """Approved before a reviewer saw the correction: drawn by hand, reviewed by nobody."""
+        self.review(self.store, self.rita, rejected=["FEMUR_LEFT"])
+        self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_LEFT"])
+        outcome = self.store.approve(KEY, allow_unaccepted=True)
+        self.assertEqual(self.builder.origins(1, 1)["FEMUR_LEFT"], "manual")
+        self.assertEqual(outcome.reviewed_labels, ["FEMUR_RIGHT"])
+
+    def test_a_label_reviewed_already_that_nobody_redrew_stays_reviewed(self):
+        """Approving early never makes a label reviewed that nobody accepted, nor unreviews one."""
+        self.review(self.store, self.rita, accepted=["FEMUR_RIGHT"], rejected=["FEMUR_LEFT"])
+        outcome = self.store.approve(KEY, allow_unaccepted=True)
+        self.assertEqual(outcome.reviewed_labels, ["FEMUR_LEFT", "FEMUR_RIGHT"])
+
+    def test_a_label_reviewed_already_and_redrawn_must_be_accepted_again(self):
+        self.store = self.make_store()  # FEMUR_LEFT, reviewed already, is not under review
+        rita = self.store.create_user("rita2", roles=[REVIEWER])[0]
+        eddie = self.store.create_user("eddie2", roles=[EDITOR])[0]
+        self.review(self.store, rita, rejected=["FEMUR_RIGHT"])
+        self.edit(self.store, eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_LEFT", "FEMUR_RIGHT"])
+        case = self.store.case_of(KEY)
+        self.assertEqual(case.labels["FEMUR_LEFT"].state, "pending", "the correction spilled into it")
+        outcome = self.store.approve(KEY, allow_unaccepted=True)
+        self.assertEqual(outcome.reviewed_labels, [])
+
+
+class ApprovalOriginsTests(unittest.TestCase):
+    """``workflow.approval_origins``, ``changed_origins`` and ``reviewed_after`` on their own."""
+
+    def case(self, labels: dict, reviewed_before=()) -> Case:
+        return Case(
+            scan_key=KEY, dataset_id=1, subject_id=1, scan_id=1, stage="approval", labels=labels,
+            reviewed_before=list(reviewed_before), created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
+        )
+
+    def test_scan_json_lists_exactly_the_painted_labels(self):
+        case = self.case({
+            "FEMUR_LEFT": CaseLabel(state="accepted"),
+            "FEMUR_RIGHT": CaseLabel(state="accepted", drawn=True),
+            "SACRUM": CaseLabel(state="removed", painted=False),
+            "PATELLA_LEFT": CaseLabel(state="accepted", drawn=True),
+        })
+        before = {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "model:M@1", "SACRUM": "source"}
+        after = workflow.approval_origins(case, before)
+        self.assertEqual(after, {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "manual", "PATELLA_LEFT": "manual"})
+        self.assertEqual(
+            workflow.changed_origins(before, after), {"FEMUR_RIGHT": "manual", "PATELLA_LEFT": "manual", "SACRUM": None}
+        )
+
+    def test_a_painted_label_nobody_drew_and_scan_json_does_not_list_has_no_origin(self):
+        case = self.case({"FEMUR_LEFT": CaseLabel(state="accepted"), "SACRUM": CaseLabel(state="accepted")})
+        with self.assertRaises(workflow.UnknownOrigin) as ctx:
+            workflow.approval_origins(case, {"FEMUR_LEFT": "source"})
+        self.assertEqual(ctx.exception.labels, ["SACRUM"])
+
+    def test_what_an_approval_leaves_reviewed(self):
+        case = self.case(
+            {
+                "FEMUR_LEFT": CaseLabel(state="accepted"),
+                "FEMUR_RIGHT": CaseLabel(state="kept"),
+                "TIBIA_LEFT": CaseLabel(state="kept"),
+                "TIBIA_RIGHT": CaseLabel(state="pending", drawn=True),
+                "SACRUM": CaseLabel(state="rejected"),
+                "PATELLA_LEFT": CaseLabel(state="removed", painted=False),
+            },
+            reviewed_before=["FEMUR_RIGHT", "TIBIA_RIGHT", "SACRUM", "PATELLA_LEFT"],
+        )
+        self.assertEqual(workflow.reviewed_after(case), ["FEMUR_LEFT", "FEMUR_RIGHT", "SACRUM"])
 
 
 class StoredFormatTests(EditorTestCase):
@@ -190,13 +273,13 @@ class RejectedSubmissionTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
         self.before = self.dataset_state()
 
     def reject(self, role: str, upload=None, comment=None):
-        assignment = self.store.next_subject(self.alice, role)
+        assignment = self.store.next_scan(self.alice, role)
         return self.store.submit(assignment.assignment_id, self.alice, False, upload, comment=comment)
 
     def test_a_reviewers_rejection_changes_nothing_in_the_dataset(self):
@@ -351,7 +434,7 @@ class SubmissionValidationTests(EditorTestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_a_dataset_regenerated_under_another_schema_is_refused(self):
-        """The dataset changed format while the subject was out."""
+        """The dataset changed format while the scan was out."""
         self.builder.add_dataset(1, schema_version="0.2.0")
         with self.assertRaises(QCError) as ctx:
             self.submit(self.upload_file(["FEMUR_LEFT"]))
@@ -367,16 +450,13 @@ class PartialUploadTests(QCTestCase):
     client that exported only its visible segments would drop the rest -- so, unless a reviewer
     asked for a removal, a reviewer must agree to it first (with edits needing review, the
     default), and the administrator sees it in the approval list either way. Once approved,
-    the labels become not available (0); the dataset's previous file is kept in
-    ``.bonehub_qc/<server>/backups/``, and ``mark_removed_labels_absent=False`` keeps the
-    Subject_info half of it.
+    the labels are taken out of scan.json, which lists exactly the labels of the segmentation;
+    the scan's previous file is kept in ``.bonehub_qc/<server>/backups/``.
     """
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(
-            1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1, "TIBIA_LEFT": 1, "SACRUM": 1}
-        )
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT", "SACRUM"])
         self.original = self.builder.segmentation_file(1, 1).read_bytes()
 
     def drop_all_but_the_left_femur(self, **config):
@@ -394,25 +474,15 @@ class PartialUploadTests(QCTestCase):
         for name in ("FEMUR_RIGHT", "TIBIA_LEFT", "SACRUM"):
             self.assertEqual((case.labels[name].state, case.labels[name].painted), ("pending", False), name)
 
-    def test_once_agreed_and_approved_they_are_not_available(self):
+    def test_once_agreed_and_approved_they_are_taken_out_of_scan_json(self):
         store, rita = self.drop_all_but_the_left_femur()
         self.review(store, rita)
         outcome = store.approve(KEY)
-        self.assertEqual(
-            self.builder.subject_info(1, 1)["segmentation"],
-            {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 0, "TIBIA_LEFT": 0, "SACRUM": 0},
-        )
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source"})
+        self.assertEqual(outcome.updated_labels, {"FEMUR_RIGHT": None, "TIBIA_LEFT": None, "SACRUM": None})
         self.assertEqual(self.builder.labels_in_segmentation(1, 1), {"FEMUR_LEFT"})
         self.assertEqual(Path(outcome.backup_path).read_bytes(), self.original)
-
-    def test_the_policy_flag_keeps_the_other_bones_untouched(self):
-        store, rita = self.drop_all_but_the_left_femur(mark_removed_labels_absent=False)
-        self.review(store, rita)
-        store.approve(KEY)
-        self.assertEqual(
-            self.builder.subject_info(1, 1)["segmentation"],
-            {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1, "TIBIA_LEFT": 1, "SACRUM": 1},
-        )
+        self.assertEqual(self.reviewed(store), {"FEMUR_LEFT"})
 
 
 class AuditTrailTests(QCTestCase):
@@ -422,8 +492,8 @@ class AuditTrailTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
 
@@ -434,7 +504,7 @@ class AuditTrailTests(QCTestCase):
     def test_a_verdict_is_logged_in_the_state_folder_and_not_next_to_the_dataset(self):
         self.review(self.store, self.alice, rejected=["FEMUR_RIGHT"], comment="head cut off")
         log = (self.state_dir / "server.log").read_text(encoding="utf-8")
-        self.assertIn(f"Subject {KEY} reviewed by 'alice'", log)
+        self.assertIn(f"Scan {KEY} reviewed by 'alice'", log)
         self.assertIn("accepted FEMUR_LEFT; rejected FEMUR_RIGHT.", log)
         self.assertIn("head cut off", log)
         self.assertFalse(self.builder.dataset_log(1).exists())
@@ -452,7 +522,7 @@ class AuditTrailTests(QCTestCase):
         entries = [e for e in self.submissions() if e["kind"] == "submission"]
         self.assertEqual(len(entries), 1)
         entry = entries[0]
-        self.assertEqual((entry["user"], entry["role"], entry["subject_key"]), ("alice", REVIEWER, KEY))
+        self.assertEqual((entry["user"], entry["role"], entry["scan_key"]), ("alice", REVIEWER, KEY))
         self.assertTrue(entry["quality_check_confirmed"])
         self.assertEqual(entry["accepted_labels"], ["FEMUR_LEFT"])
         self.assertEqual(entry["rejected_labels"], ["FEMUR_RIGHT"])
@@ -460,7 +530,7 @@ class AuditTrailTests(QCTestCase):
         self.assertIn("timestamp", entry)
 
     def test_assignments_are_recorded_as_well_as_submissions(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         kinds = [entry["kind"] for entry in self.submissions()]
         self.assertIn("assigned", kinds)
         self.assertIn("user_created", kinds)
@@ -472,11 +542,11 @@ class AuditTrailTests(QCTestCase):
         self.review(self.store, self.alice)
         recent = self.store.audit.read_recent(limit=10, kind="submission")
         self.assertEqual(len(recent), 2)
-        self.assertEqual(recent[0]["subject_key"], "001_000002", "newest first")
+        self.assertEqual(recent[0]["scan_key"], "ds-0001/sub-000002/scan-01", "newest first")
         self.assertEqual(len(self.store.audit.read_recent(limit=1)), 1)
 
     def test_each_dataset_gets_its_own_log_next_to_the_data(self):
-        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(2, 1, segmentation=["FEMUR_LEFT"])
         store = self.make_store()
         for _ in range(3):
             self.review(store, self.alice)
@@ -484,19 +554,19 @@ class AuditTrailTests(QCTestCase):
 
         self.assertTrue(self.builder.dataset_log(1).exists())
         self.assertTrue(self.builder.dataset_log(2).exists())
-        self.assertIn("002_000001", self.builder.dataset_log(2).read_text(encoding="utf-8"))
-        self.assertNotIn("002_000001", self.builder.dataset_log(1).read_text(encoding="utf-8"))
+        self.assertIn("ds-0002/sub-000001/scan-01", self.builder.dataset_log(2).read_text(encoding="utf-8"))
+        self.assertNotIn("ds-0002/sub-000001/scan-01", self.builder.dataset_log(1).read_text(encoding="utf-8"))
 
 
 class RefusedReplaceTests(QCTestCase):
     """Windows refuses, for a moment, to replace a file that another process has open.
 
-    A virus scanner looking at a Subject_info file just written is enough, and so is another
-    client that has the file open on an SMB share.
+    A virus scanner looking at a scan.json just written is enough, and so is another client
+    that has the file open on an SMB share.
     """
 
     def test_a_briefly_refused_write_still_lands(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         store = self.make_store()
         alice = store.create_user("alice")[0]
         self.review(store, alice)
@@ -504,7 +574,7 @@ class RefusedReplaceTests(QCTestCase):
         refused = []
 
         def refuse_twice(source, target):
-            if str(target).endswith("Subject_info_001.json") and len(refused) < 2:
+            if str(target).endswith("scan.json") and len(refused) < 2:
                 refused.append(target)
                 raise PermissionError(13, "Access is denied")
             real_replace(source, target)
@@ -512,9 +582,9 @@ class RefusedReplaceTests(QCTestCase):
         with mock.patch("qc_server.store.os.replace", side_effect=refuse_twice), mock.patch(
             "qc_server.store.time.sleep"
         ):
-            store.approve(KEY)
+            store.approve(KEY, remark="Hip implant")
         self.assertEqual(len(refused), 2)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2})
+        self.assertEqual(self.builder.scan_info(1, 1)["remarks"], "QC: Hip implant")
 
     def test_a_refusal_that_lasts_is_still_reported(self):
         source = self.tmp_path / "new.json"

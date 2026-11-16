@@ -1,20 +1,20 @@
 // BoneHub Quality Check -- browser review page.
 //
-// Signs in with a reviewer's API key, leases subjects from /api/v1 the way the 3D Slicer
+// Signs in with a reviewer's API key, leases scans from /api/v1 the way the 3D Slicer
 // extension does, shows them with NiiVue, and sends the verdict back: each label under review
 // accepted or rejected, and bones the segmentation lacks reported missing. It cannot edit a
 // segmentation: the verdict judges the segmentation as it is (use_stored_segmentation), and
-// what it rejects goes to an editor, in 3D Slicer, who corrects it or takes it out. A subject no
+// what it rejects goes to an editor, in 3D Slicer, who corrects it or takes it out. A scan no
 // correction would help -- a poor or cropped image, an implant -- is rejected as a whole, and
 // goes to the administrator instead. Verdicts wait on the server until its administrator
-// approves the subject.
+// approves the scan.
 //
 // Every request says that it comes from a reviewer, so the server refuses the key of an
 // account that is not one.
 //
 // On a reliability study server (see qc_server.study) the same page shows study readings, judged
 // as in the quality check but with no missing-bone reports. A reading is blind -- no history, no
-// earlier verdict, and the subject's id only if the study shows it -- and has no lease. The
+// earlier verdict, and the scan's id only if the study shows it -- and has no lease. The
 // rater sees their own code.
 //
 // Two NiiVue canvases. The 3D view shows each segment as a smooth surface, built here from its
@@ -29,8 +29,13 @@ const PREFS_STORAGE = "bonehub_qc_review_prefs";
 const ROLE_HEADER = "X-Client-Role";
 const ROLE = "reviewer";
 
-// Short names for the Subject_info label statuses; the server's full wording is the tooltip.
-const STATUS_SHORT = { 0: "absent", 1: "unreviewed", 2: "reviewed" };
+// A label's origin in scan.json, shortly: its kind -- source, manual, model or derived -- with
+// the model or tool and the server's wording of the kind for the tooltip.
+function originText(origin) {
+  const kind = String(origin || "").split(":")[0];
+  const meaning = state.originText[kind] || "";
+  return { text: kind, title: `${origin}${meaning ? `: ${meaning}` : ""}.` };
+}
 
 // CT windows, [min, max] in Hounsfield units.
 const WINDOWS = { bone: [-450, 1050], soft: [-160, 240] };
@@ -72,7 +77,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   key: null,
   info: null, // what /api/v1/ping said about this reviewer
-  statusText: {}, // label status -> the server's wording
+  originText: {}, // kind of label origin -> the server's wording
   labelNames: [], // every BoneHub label, to report a missing bone by
   handout: null,
   segments: [], // the handout's segments, in label-value (anatomical) order
@@ -81,14 +86,14 @@ const state = {
   solo: null, // segment number shown alone, or null
   labels: new Map(), // label name -> what the quality check has made of it (the handout's labels)
   verdicts: new Map(), // label name -> "accept" or "reject", the reviewer's verdict
-  missing: new Set(), // bones reported missing that the subject does not list
+  missing: new Set(), // bones reported missing that the scan does not list
   // image and seg2d are on the slice view. segRef is the slice view's mask untouched by
   // hiding; it is on no canvas and answers "which label is here".
   volumes: { image: null, segRef: null, seg2d: null },
   surfaces: new Map(), // segment number -> its surface on the 3D view (an NVMesh)
   sliceFactors: [1, 1, 1], // every n-th voxel of the scan the slice view shows, per axis
   sliceSpacing: null, // [original mm, shown mm] per axis, when the slice view is reduced
-  loaded: false, // the subject's views were built, so what is ticked was seen
+  loaded: false, // the scan's views were built, so what is ticked was seen
   busy: false,
 };
 
@@ -101,10 +106,10 @@ function isStudy() {
   return !!(state.info && state.info.mode === "study");
 }
 
-// What the page calls a subject: its id -- or, for a study reading, the study's title for it,
-// "Reading n" unless the study shows subject ids.
-function subjectName(handout) {
-  return handout.study ? handout.study.title : handout.subject_key;
+// What the page calls a scan: its id -- or, for a study reading, the study's title for it,
+// "Reading n" unless the study shows scan ids.
+function scanName(handout) {
+  return handout.study ? handout.study.title : handout.scan_key;
 }
 
 // The rater's code, and how far they are, in the top bar; `position` while a reading is open.
@@ -116,7 +121,7 @@ function showStudyProgress(position) {
     ? "Your code: the study's results name you by it, and by nothing else."
     : started
       ? "You are not a rater in this study. Ask the administrator."
-      : "The administrator has not started the study yet. Ask for a subject once they have.";
+      : "The administrator has not started the study yet. Ask for a scan once they have.";
   $("studyProgress").textContent = !study.code
     ? ""
     : position
@@ -331,10 +336,10 @@ async function signIn(key, remember) {
   storageSet(remember ? "localStorage" : "sessionStorage", KEY_STORAGE, key);
   try {
     const labels = await api("GET", "/api/v1/labels");
-    state.statusText = labels.label_status_values || {};
+    state.originText = labels.label_origins || {};
     state.labelNames = Object.keys(labels.label_name_to_value || {}).sort();
   } catch (e) {
-    state.statusText = {};
+    state.originText = {};
   }
   $("labelNames").replaceChildren(...state.labelNames.map((name) => el("option", { value: name })));
 
@@ -348,7 +353,7 @@ async function signIn(key, remember) {
     showStudyProgress();
   } else {
     $("whoAccess").textContent = `sent: ${ACCESS_TEXT[info.data_access] || info.data_access}`;
-    $("whoAccess").title = "What your account is sent of each subject. Your administrator sets this.";
+    $("whoAccess").title = "What your account is sent of each scan. Your administrator sets this.";
   }
 
   if (!webgl2Available()) {
@@ -437,7 +442,7 @@ function clearViewers() {
 }
 
 function isCT() {
-  const modality = state.handout && state.handout.dataset_info && state.handout.dataset_info.modality;
+  const modality = state.handout && state.handout.scan_info && state.handout.scan_info.modality;
   return String(modality || "").toUpperCase() === "CT";
 }
 
@@ -517,7 +522,7 @@ async function buildViews(key, imageBuffer, segBuffer) {
   if (shown && state.sliceFactors.some((f) => f > 1)) {
     const spacing = [1, 2, 3].map((d) => Math.abs(shown.hdr.pixDims[d]));
     state.sliceSpacing = spacing.map((mm, axis) => [mm / state.sliceFactors[axis], mm]);
-    $("subjectNotes").append(
+    $("scanNotes").append(
       banner(
         `This scan is too large to show in full here, so the slices leave out voxels along its finest ` +
           `axes: ${formatSpacing(1)} instead of ${formatSpacing(0)}. Small errors can be missed. ` +
@@ -1262,8 +1267,8 @@ function showLocation(data) {
 
 // ---------------------------------------------------------- empty / loading
 function showEmpty(title, text, message) {
-  $("emptyTitle").textContent = title || "No subject open";
-  $("emptyText").textContent = text || "Ask for the next subject when you are ready to review.";
+  $("emptyTitle").textContent = title || "No scan open";
+  $("emptyText").textContent = text || "Ask for the next scan when you are ready to review.";
   $("emptyMessage").replaceChildren(...(message ? [message] : []));
   $("nextBtn").hidden = false;
   $("emptyState").hidden = false;
@@ -1301,15 +1306,15 @@ async function resumeOrWait() {
   }
 }
 
-// ---------------------------------------------------------------- subjects
-async function nextSubject() {
+// ---------------------------------------------------------------- scans
+async function nextScan() {
   setBusy(true);
   try {
-    const handout = await api("POST", "/api/v1/subjects/next");
-    await openSubject(handout);
+    const handout = await api("POST", "/api/v1/scans/next");
+    await openScan(handout);
   } catch (error) {
     if (error.status === 404) showEmpty(isStudy() ? "No reading for you now" : "Nothing to review", error.message);
-    else showEmpty("Could not get a subject", error.message, banner(error.message, "err"));
+    else showEmpty("Could not get a scan", error.message, banner(error.message, "err"));
   } finally {
     setBusy(false);
   }
@@ -1318,15 +1323,15 @@ async function nextSubject() {
 async function openAssignment(assignmentId) {
   setBusy(true);
   try {
-    await openSubject(await api("GET", `/api/v1/assignments/${encodeURIComponent(assignmentId)}`));
+    await openScan(await api("GET", `/api/v1/assignments/${encodeURIComponent(assignmentId)}`));
   } catch (error) {
-    showEmpty("Could not open the subject", "", banner(error.message, "err"));
+    showEmpty("Could not open the scan", "", banner(error.message, "err"));
   } finally {
     setBusy(false);
   }
 }
 
-async function openSubject(handout) {
+async function openScan(handout) {
   clearViewers();
   state.handout = handout;
   state.segments = [...(handout.segments || [])].sort((a, b) => a.value - b.value);
@@ -1340,13 +1345,13 @@ async function openSubject(handout) {
   $("comment").value = "";
   $("missingInput").value = "";
   $("verdictMessage").replaceChildren();
-  renderSubject();
+  renderScan();
   renderLabels();
   updateVerdictButtons();
 
-  // What the viewers name the volumes after: the subject, or a study reading that hides it.
-  const key = handout.study ? `reading-${handout.study.position}` : handout.subject_key;
-  const name = subjectName(handout);
+  // What the viewers name the volumes after: the scan, as a file name, or a study reading that hides it.
+  const key = handout.study ? `reading-${handout.study.position}` : handout.scan_key.replaceAll("/", "_");
+  const name = scanName(handout);
   if (handout.study) {
     // The study may have started since sign-in: the reading says who this rater is in it.
     state.info.study = { ...state.info.study, state: "running", code: handout.study.code, readings_total: handout.study.total };
@@ -1375,13 +1380,13 @@ async function openSubject(handout) {
     clearViewers();
     const text =
       error instanceof RangeError
-        ? "The browser ran out of memory. Close other tabs, or review this subject on a computer with more memory."
+        ? "The browser ran out of memory. Close other tabs, or review this scan on a computer with more memory."
         : error.message || String(error);
     showEmpty(
       `Could not show ${name}`,
       handout.study
         ? "You still hold this reading. Try again, or reload the page."
-        : "You still hold the subject. Try again, or release it for someone else.",
+        : "You still hold the scan. Try again, or release it for someone else.",
     );
     $("emptyMessage").replaceChildren(
       banner(text, "err"),
@@ -1391,26 +1396,27 @@ async function openSubject(handout) {
   updateVerdictButtons();
 }
 
-function renderSubject() {
+function renderScan() {
   const handout = state.handout;
-  $("subjectCard").hidden = !handout;
+  $("scanCard").hidden = !handout;
   $("labelsCard").hidden = !handout;
   $("verdictCard").hidden = !handout;
   if (!handout) return;
 
-  $("subjectKey").textContent = subjectName(handout);
+  $("scanKey").textContent = scanName(handout);
   const dataset = handout.dataset_info || {};
+  const modality = (handout.scan_info || {}).modality;
   if (handout.study) {
-    // A study reading names the dataset only when the study shows subject ids.
+    // A study reading names the dataset only when the study shows scan ids.
     const facts = [`reading ${handout.study.position} of ${handout.study.total}`];
     if (handout.dataset_id !== null && handout.dataset_id !== undefined) {
       facts.push(`${dataset.name || "Dataset"} · dataset ${handout.dataset_id}`);
     }
-    if (dataset.modality) facts.push(dataset.modality);
-    $("subjectFacts").replaceChildren(el("div", {}, facts.join(" · ")));
+    if (modality) facts.push(modality);
+    $("scanFacts").replaceChildren(el("div", {}, facts.join(" · ")));
   } else {
-    $("subjectFacts").replaceChildren(
-      el("div", {}, `${dataset.name || "Dataset"} · dataset ${handout.dataset_id}${dataset.modality ? ` · ${dataset.modality}` : ""}`),
+    $("scanFacts").replaceChildren(
+      el("div", {}, `${dataset.name || "Dataset"} · dataset ${handout.dataset_id}${modality ? ` · ${modality}` : ""}`),
     );
   }
   renderLease();
@@ -1425,7 +1431,7 @@ function renderSubject() {
   }
   if (handout.data_access === "image") {
     notes.push(
-      "Your account is sent images only, so it cannot judge the segmentation. Report missing bones, reject the subject, or release it.",
+      "Your account is sent images only, so it cannot judge the segmentation. Report missing bones, reject the scan, or release it.",
     );
   } else if (handout.data_access === "segmentation") {
     notes.push("Your account is sent the segmentation only; the slices show the labels without the image.");
@@ -1434,8 +1440,8 @@ function renderSubject() {
   if (handout.data_access !== "image" && !handout.has_segmentation) {
     notes.push(
       isEditor()
-        ? "This subject has no segmentation yet. Create one in 3D Slicer, or release the subject."
-        : "This subject has no segmentation yet, and creating one is for an editor, in 3D Slicer. Release it.",
+        ? "This scan has no segmentation yet. Create one in 3D Slicer, or release the scan."
+        : "This scan has no segmentation yet, and creating one is for an editor, in 3D Slicer. Release it.",
     );
   } else if (handout.has_segmentation && !state.segments.length) {
     notes.push("The server could not read which labels this segmentation holds, so it cannot be reviewed here.");
@@ -1445,7 +1451,7 @@ function renderSubject() {
         "Reject its labels, so that an editor rewrites it on the image's grid in 3D Slicer.",
     );
   }
-  $("subjectNotes").replaceChildren(...notes.map((text) => banner(text, "note")));
+  $("scanNotes").replaceChildren(...notes.map((text) => banner(text, "note")));
   renderHistory();
 }
 
@@ -1464,7 +1470,7 @@ function renderLease() {
     minutes <= 0 ? "expired" : minutes < 60 ? `in ${minutes} min` : `in ${Math.round(minutes / 60)} h`;
   $("leaseText").textContent = `Yours until ${expires.toLocaleString()} (${relative})`;
   $("leaseText").title =
-    "After this the subject goes back to the queue. You can still submit afterwards, unless someone else has taken it.";
+    "After this the scan goes back to the queue. You can still submit afterwards, unless someone else has taken it.";
 }
 
 // ------------------------------------------------------------------- labels
@@ -1482,18 +1488,28 @@ function labelStatus(label) {
         };
       }
       if (label.edited_by) return { text: `edited · ${label.edited_by}`, title: `Corrected by ${label.edited_by}, in 3D Slicer.` };
-      if (!label.dataset_status) {
-        return { text: "new", title: "Subject_info does not list this label as available, and nobody has reviewed it." };
+      if (!label.origin) {
+        return { text: "new", title: "scan.json does not list this label, so where it comes from is unknown, and nobody has reviewed it." };
       }
-      return { text: STATUS_SHORT[label.dataset_status] || String(label.dataset_status), title: state.statusText[label.dataset_status] || "" };
+      if (label.reviewed) {
+        const origin = originText(label.origin);
+        return { text: `${origin.text} · reviewed`, title: `${origin.title} Reviewed on this database already: this is a second review.` };
+      }
+      return originText(label.origin);
     case "accepted":
       return { text: `accepted${by}`, title: "Accepted already. Reject it if you see a problem." };
     case "kept":
-      return { text: "reviewed", title: "Reviewed in the dataset already, so not under review. Reject it if you see a problem." };
+      if (label.reviewed) {
+        return { text: "reviewed", title: "Reviewed on this database already, so not under review. Reject it if you see a problem." };
+      }
+      return {
+        text: originText(label.origin).text,
+        title: `${originText(label.origin).title} This server does not review labels of this origin. Reject it if you see a problem.`,
+      };
     case "removed":
       return {
         text: label.by ? `removed · ${label.by}` : "not painted",
-        title: "Not in the segmentation: it becomes not available when the subject is approved. Reject it if the bone is missing.",
+        title: "Not in the segmentation: it is taken out of scan.json when the scan is approved. Reject it if the bone is missing.",
       };
     case "rejected":
       return {
@@ -1638,12 +1654,12 @@ function renderLabels() {
   if (!handout.has_segmentation && [...state.labels.values()].some((label) => label.painted)) {
     foot.push(
       handout.data_access === "image"
-        ? "Your account is not sent segmentations, so you can report missing bones, or reject the subject, but not judge its labels."
+        ? "Your account is not sent segmentations, so you can report missing bones, or reject the scan, but not judge its labels."
         : "The segmentation could not be sent.",
     );
   }
-  if ([...state.labels.values()].some((label) => !label.painted) && state.info && state.info.mark_removed_labels_absent) {
-    foot.push("A label not in the segmentation becomes not available when the subject is approved, unless reported missing.");
+  if ([...state.labels.values()].some((label) => !label.painted)) {
+    foot.push("A label not in the segmentation is taken out of scan.json when the scan is approved, unless reported missing.");
   }
   $("labelsFoot").textContent = foot.join(" ");
   $("labelsTitle").textContent = state.labels.size ? `Labels (${state.labels.size})` : "Labels";
@@ -1736,7 +1752,7 @@ function showAllLabels() {
 }
 
 // ------------------------------------------------------------------ history
-// What happened to the subject before it reached this reviewer, oldest first.
+// What happened to the scan before it reached this reviewer, oldest first.
 function renderHistory() {
   const events = (state.handout && state.handout.history) || [];
   const list = $("historyList");
@@ -1778,7 +1794,7 @@ function describeEvent(event) {
 // ------------------------------------------------------------------ verdict
 // The verdict as the server takes it: accepted labels, rejected ones in the segmentation, and
 // bones reported missing -- a label not in the segmentation that is rejected, or one the
-// subject does not list.
+// scan does not list.
 function verdictToSend() {
   const accepted = [];
   const rejected = [];
@@ -1829,7 +1845,7 @@ function updateVerdictButtons() {
         ? `Give every label under review a verdict first: ${open.join(", ")}.`
         : toEditors
           ? "The rejected labels go to the editors, to correct in 3D Slicer."
-          : "The subject waits for the administrator's approval.";
+          : "The scan waits for the administrator's approval.";
   }
   confirm.disabled = state.busy || !ready;
   $("rejectBtn").disabled = state.busy || !holding;
@@ -1878,19 +1894,19 @@ async function onSubmit() {
         "p",
         {},
         toEditors
-          ? "The subject goes to the editors; the labels you accepted wait for their correction."
+          ? "The scan goes to the editors; the labels you accepted wait for their correction."
           : leftOver
             ? "The labels you could not judge wait for another reviewer."
-            : "The subject then waits for the administrator's approval.",
+            : "The scan then waits for the administrator's approval.",
       ),
-      el("p", { className: "muted" }, "Nothing is written into the dataset until the administrator approves the subject."),
+      el("p", { className: "muted" }, "Nothing is written into the dataset until the administrator approves the scan."),
     );
   }
   if (state.sliceSpacing) {
     body.push(el("p", {}, `Your comment will note that you saw the scan at ${formatSpacing(1)}.`));
   }
   const send = toEditors && !isStudy() ? "Send to editors" : "Submit";
-  if (!(await ask(`Submit your verdict on ${subjectName(handout)}?`, body, send))) return;
+  if (!(await ask(`Submit your verdict on ${scanName(handout)}?`, body, send))) return;
   const metadata = {
     quality_check_confirmed: true,
     use_stored_segmentation: true,
@@ -1907,11 +1923,11 @@ function studyNote() {
   return el("p", { className: "muted" }, "Your verdict is recorded for the study, and cannot be changed afterwards. Nothing in the dataset changes.");
 }
 
-// The subject rejected as a whole, as no correction of its segmentation would help: it goes to
+// The scan rejected as a whole, as no correction of its segmentation would help: it goes to
 // the administrator, who records why, and not to the editors.
 async function onReject() {
   const handout = state.handout;
-  const name = subjectName(handout);
+  const name = scanName(handout);
   const comment = $("comment").value.trim();
   if (!comment) {
     const anyway = await ask(
@@ -1929,7 +1945,7 @@ async function onReject() {
     !(await ask(
       `Reject ${name}?`,
       [
-        el("p", {}, "Reject the subject as a whole only when no correction of its segmentation would help. To have labels corrected, reject the labels instead."),
+        el("p", {}, "Reject the scan as a whole only when no correction of its segmentation would help. To have labels corrected, reject the labels instead."),
         isStudy()
           ? studyNote()
           : el("p", { className: "muted" }, "It goes to the administrator with your comment, not to the editors. Nothing in the dataset changes."),
@@ -1955,12 +1971,12 @@ async function submitVerdict(metadata, workingText) {
     });
     if (handout.study) {
       state.info.study = { ...state.info.study, readings_done: result.readings_done, readings_total: result.readings_total };
-      await finishSubject(result.message || "Recorded.");
+      await finishScan(result.message || "Recorded.");
     } else {
-      await finishSubject(`${handout.subject_key}: ${result.message || "submitted."}`);
+      await finishScan(`${handout.scan_key}: ${result.message || "submitted."}`);
     }
   } catch (error) {
-    showVerdictMessage(`Not submitted, so you still hold the subject: ${error.message}`, "err");
+    showVerdictMessage(`Not submitted, so you still hold the scan: ${error.message}`, "err");
   } finally {
     setBusy(false);
   }
@@ -1969,13 +1985,13 @@ async function submitVerdict(metadata, workingText) {
 async function onRelease() {
   const handout = state.handout;
   const sure = await ask(
-    `Release ${subjectName(handout)}?`,
+    `Release ${scanName(handout)}?`,
     [
       el(
         "p",
         {},
         handout.study
-          ? "You give it back without a verdict. It stays your next reading: you get it again when you ask for the next subject."
+          ? "You give it back without a verdict. It stays your next reading: you get it again when you ask for the next scan."
           : "It goes back to the queue without a verdict, and someone else can review it.",
       ),
     ],
@@ -1985,7 +2001,7 @@ async function onRelease() {
   setBusy(true);
   try {
     await api("POST", `/api/v1/assignments/${encodeURIComponent(handout.assignment_id)}/release`);
-    await finishSubject(`${subjectName(handout)} was released.`);
+    await finishScan(`${scanName(handout)} was released.`);
   } catch (error) {
     showVerdictMessage(error.message, "err");
   } finally {
@@ -2007,7 +2023,7 @@ async function onExtend() {
   }
 }
 
-async function finishSubject(message) {
+async function finishScan(message) {
   clearViewers();
   state.handout = null;
   state.segments = [];
@@ -2015,14 +2031,14 @@ async function finishSubject(message) {
   state.labels = new Map();
   state.verdicts = new Map();
   state.missing = new Set();
-  renderSubject();
+  renderScan();
   renderLabels();
   updateToolbar();
   if (isStudy()) showStudyProgress();
-  showEmpty("Done", "Ask for the next subject when you are ready.", banner(message, "ok"));
+  showEmpty("Done", "Ask for the next scan when you are ready.", banner(message, "ok"));
   if (prefs.autoNext) {
     setBusy(false);
-    await nextSubject();
+    await nextScan();
   }
 }
 
@@ -2045,7 +2061,7 @@ function wire() {
   });
   $("signOutBtn").addEventListener("click", signOut);
 
-  $("nextBtn").addEventListener("click", nextSubject);
+  $("nextBtn").addEventListener("click", nextScan);
   $("confirmBtn").addEventListener("click", onSubmit);
   $("rejectBtn").addEventListener("click", onReject);
   $("releaseBtn").addEventListener("click", onRelease);

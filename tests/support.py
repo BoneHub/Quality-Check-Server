@@ -1,19 +1,21 @@
-"""Fixtures shared by the tests: a throw-away dataset in BoneHub data structure format.
+"""Fixtures shared by the tests: a throw-away database in the BoneHub format.
 
-The tests never touch a real dataset. Every test case builds its own dataset root in a
+The tests never touch a real dataset. Every test case builds its own database in a
 temporary folder, which is what the server is pointed at::
 
-    <root>/Dataset_001/Dataset_info_001.json
-    <root>/Dataset_001/Subject_info_001.json
-    <root>/Dataset_001/Image/001_000001.nii.gz
-    <root>/Dataset_001/Segmentation/001_000001.seg.nrrd
+    <root>/ds-0001/dataset.json
+    <root>/ds-0001/sub-000001/subject.json
+    <root>/ds-0001/sub-000001/scan-01/scan.json
+    <root>/ds-0001/sub-000001/scan-01/image.nii.gz
+    <root>/ds-0001/sub-000001/scan-01/segmentation.seg.nrrd
 
 and a credentials folder beside it -- not inside it -- standing in for the container's
 credentials volume, with a fixed server id so the server's state folder on the "share" is
 known in advance: ``<root>/.bonehub_qc/qc_test_server/``.
 
-Masks are written and read with ``bonehub_data_schema``'s own functions, so the fixtures are
-in exactly the format the converters produce.
+Metadata and masks are written and read with ``bonehub_format``'s own functions, so the
+fixtures are in exactly the format the converters produce. A label that is reviewed already
+is one that an earlier server's approval left reviewed (:meth:`DatasetBuilder.mark_reviewed`).
 """
 
 from __future__ import annotations
@@ -30,20 +32,22 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from bonehub_data_schema import (
+from bonehub_format import (
+    SCHEMA_VERSION,
     SEGMENTATION_SUFFIX,
     BoneLabelMap,
-    __version__ as SCHEMA_VERSION,
+    ScanInfo,
+    SubjectInfo,
+    layout,
     read_segmentation,
     write_segmentation,
 )
-from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
 
 from qc_server import auth
-from qc_server.audit import AuditLog
+from qc_server.audit import AuditLog, qualitycheck_log_name
 from qc_server.config import ENV_PREFIX, QCServerConfig
 from qc_server.models import EDITOR, REVIEWER
-from qc_server.store import QCStore
+from qc_server.store import DONE_CASES_FILE_NAME, QCStore, file_fingerprint
 
 
 def _silence_audit_console() -> None:
@@ -76,9 +80,13 @@ LABEL_VALUE = {label.name: label.value for label in BoneLabelMap}
 #: The id of the server every test case runs, unless it makes another.
 TEST_SERVER_ID = "qc_test_server"
 
+#: The server whose approvals left the labels a fixture marks as reviewed already.
+EARLIER_SERVER_ID = "qc_earlier_server"
 
-def subject_key(dataset_id: int, subject_id: int) -> str:
-    return f"{str(dataset_id).zfill(DATASET_ZFILL)}_{str(subject_id).zfill(SUBJECT_ZFILL)}"
+
+def scan_key(dataset_id: int, subject_id: int, scan_id: int = 1) -> str:
+    """The scan's path in the database, which names it: 'ds-0001/sub-000001/scan-01'."""
+    return layout.scan_key(dataset_id, subject_id, scan_id)
 
 
 def clear_qc_env() -> None:
@@ -164,98 +172,133 @@ def labels_in_mask(path: Path) -> set:
 
 
 class DatasetBuilder:
-    """Builds a dataset root the server can be pointed at."""
+    """Builds a database the server can be pointed at."""
 
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self._subjects: dict[int, list[dict]] = {}
 
     def add_dataset(
         self, dataset_id: int, name: str | None = None, schema_version: str | None = SCHEMA_VERSION
     ) -> "DatasetBuilder":
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        dataset_dir = self.root / f"Dataset_{padded}"
-        dataset_dir.mkdir(parents=True, exist_ok=True)
-        info = {"dataset_id": dataset_id, "name": name or f"Test dataset {dataset_id}", "modality": "CT"}
+        """A dataset folder with its dataset.json; ``schema_version`` None leaves it unrecorded."""
+        folder = layout.dataset_path(self.root, dataset_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        info = {"name": name or f"Test dataset {dataset_id}", "license": "CC-BY-4.0"}
         if schema_version is not None:
             info["schema_version"] = schema_version
-        (dataset_dir / f"Dataset_info_{padded}.json").write_text(json.dumps(info, indent=4), encoding="utf-8")
-        self._subjects.setdefault(dataset_id, [])
-        self._write_subject_info(dataset_id)
+        (folder / layout.DATASET_JSON).write_text(json.dumps(info, indent=4), encoding="utf-8")
         return self
 
-    def add_subject(
+    def add_scan(
         self,
         dataset_id: int,
         subject_id: int,
-        segmentation: dict | None = None,
+        scan_id: int = 1,
+        segmentation=None,
+        painted=None,
+        reviewed=(),
         image: bool = True,
-        write_image_file: bool | None = None,
         write_segmentation_file: bool | None = None,
-        **extra,
+        subject: dict | None = None,
+        **scan_fields,
     ) -> "DatasetBuilder":
-        """Add one subject, and by default the image and segmentation files that go with it.
+        """Add one scan, and by default the image and segmentation files that go with it.
 
-        ``segmentation`` maps label names to label statuses (0, 1 or 2). The mask holds the
-        labels with status 1 or 2. ``write_image_file`` / ``write_segmentation_file``
-        default to what the metadata claims, so a test can create the mismatch of a
-        subject whose file is missing.
+        ``segmentation`` lists the labels scan.json gives the segmentation: names, each of
+        origin ``source``, or a mapping of names to origins. The mask paints them, or the labels
+        in ``painted`` when given, so a test can create a mask and a scan.json that disagree;
+        ``write_segmentation_file`` False writes no mask at all. ``reviewed`` are the labels an
+        earlier server's approval left reviewed. ``image`` False writes no image file. The
+        subject's subject.json is written with the first of its scans, from ``subject``;
+        ``scan_fields`` go into scan.json.
         """
-        if dataset_id not in self._subjects:
+        if not (layout.dataset_path(self.root, dataset_id) / layout.DATASET_JSON).exists():
             self.add_dataset(dataset_id)
+        origins = _origins(segmentation)
+        subject_json = layout.subject_path(self.root, dataset_id, subject_id) / layout.SUBJECT_JSON
+        if not subject_json.exists():
+            subject_info = {"source_subject_id": f"case_{subject_id}", **(subject or {})}
+            SubjectInfo(**subject_info).save(subject_json)
+        folder = layout.scan_path(self.root, dataset_id, subject_id, scan_id)
+        info = ScanInfo(
+            source_scan_id=f"case_{subject_id}/scan_{scan_id}",
+            **{"modality": "CT", **scan_fields},
+            segmentation=origins or None,
+        )
+        info.save(folder / layout.SCAN_JSON)
 
-        entry = {"dataset_id": dataset_id, "subject_id": subject_id, "image": image}
-        if segmentation is not None:
-            entry["segmentation"] = dict(segmentation)
-        entry.update(extra)
-        self._subjects[dataset_id].append(entry)
-        self._write_subject_info(dataset_id)
-
-        if image if write_image_file is None else write_image_file:
-            write_image(self.image_file(dataset_id, subject_id))
-
-        present = sorted(label for label, status in (segmentation or {}).items() if status > 0)
-        if bool(present) if write_segmentation_file is None else write_segmentation_file:
-            write_mask(self.segmentation_file(dataset_id, subject_id), present)
+        if image:
+            write_image(self.image_file(dataset_id, subject_id, scan_id))
+        labels = sorted(origins) if painted is None else sorted(painted)
+        if bool(labels) if write_segmentation_file is None else write_segmentation_file:
+            write_mask(self.segmentation_file(dataset_id, subject_id, scan_id), labels)
+        if reviewed:
+            self.mark_reviewed(dataset_id, subject_id, scan_id, reviewed)
         return self
 
-    def _write_subject_info(self, dataset_id: int) -> None:
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        path = self.root / f"Dataset_{padded}" / f"Subject_info_{padded}.json"
-        path.write_text(json.dumps(self._subjects[dataset_id], indent=4), encoding="utf-8")
+    def mark_reviewed(
+        self, dataset_id: int, subject_id: int, scan_id: int, labels, server_id: str = EARLIER_SERVER_ID
+    ) -> Path:
+        """Record that another server approved the scan, leaving ``labels`` reviewed with its
+        segmentation as it is now: a line of that server's done file, as the server writes it."""
+        key = scan_key(dataset_id, subject_id, scan_id)
+        result = file_fingerprint(self.segmentation_file(dataset_id, subject_id, scan_id))
+        case = {
+            "scan_key": key,
+            "dataset_id": dataset_id,
+            "subject_id": subject_id,
+            "scan_id": scan_id,
+            "stage": "applied",
+            "revision": 3,
+            "labels": {label: {"state": "accepted", "painted": True} for label in sorted(labels)},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "applied_at": "2026-01-01T00:00:00Z",
+            "result": result.model_dump() if result else None,
+            "reviewed_labels": sorted(labels),
+            "events": [],
+        }
+        path = self.root / ".bonehub_qc" / server_id / DONE_CASES_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(case) + "\n")
+        return path
 
     # --- reading back, for assertions ---------------------------------------
-    def subject_info(self, dataset_id: int, subject_id: int) -> dict:
-        """The subject's entry as it stands on disk right now."""
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        path = self.root / f"Dataset_{padded}" / f"Subject_info_{padded}.json"
-        for entry in json.loads(path.read_text(encoding="utf-8")):
-            if entry.get("subject_id") == subject_id:
-                return entry
-        raise AssertionError(f"Subject {subject_key(dataset_id, subject_id)} is not in {path}.")
-
-    def all_subject_info(self, dataset_id: int) -> list:
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        path = self.root / f"Dataset_{padded}" / f"Subject_info_{padded}.json"
+    def scan_info(self, dataset_id: int, subject_id: int, scan_id: int = 1) -> dict:
+        """The scan's scan.json as it stands on disk right now."""
+        path = layout.scan_path(self.root, dataset_id, subject_id, scan_id) / layout.SCAN_JSON
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def segmentation_file(self, dataset_id: int, subject_id: int) -> Path:
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        key = subject_key(dataset_id, subject_id)
-        return self.root / f"Dataset_{padded}" / "Segmentation" / f"{key}{SEGMENTATION_SUFFIX}"
+    def origins(self, dataset_id: int, subject_id: int, scan_id: int = 1) -> dict:
+        """The labels scan.json gives the scan's segmentation, with their origins."""
+        return self.scan_info(dataset_id, subject_id, scan_id).get("segmentation") or {}
 
-    def image_file(self, dataset_id: int, subject_id: int) -> Path:
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        return self.root / f"Dataset_{padded}" / "Image" / f"{subject_key(dataset_id, subject_id)}.nii.gz"
+    def scan_folder(self, dataset_id: int, subject_id: int, scan_id: int = 1) -> Path:
+        return layout.scan_path(self.root, dataset_id, subject_id, scan_id)
+
+    def segmentation_file(self, dataset_id: int, subject_id: int, scan_id: int = 1) -> Path:
+        return self.scan_folder(dataset_id, subject_id, scan_id) / layout.SEGMENTATION_FILE
+
+    def image_file(self, dataset_id: int, subject_id: int, scan_id: int = 1) -> Path:
+        return self.scan_folder(dataset_id, subject_id, scan_id) / layout.IMAGE_FILE
 
     def dataset_log(self, dataset_id: int) -> Path:
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        return self.root / f"Dataset_{padded}" / f"Dataset_{padded}_qualitycheck.log"
+        return self.root / layout.LOGS_DIR / qualitycheck_log_name(dataset_id)
 
-    def labels_in_segmentation(self, dataset_id: int, subject_id: int) -> set:
+    def labels_in_segmentation(self, dataset_id: int, subject_id: int, scan_id: int = 1) -> set:
         """Label names actually painted into the stored segmentation file."""
-        return labels_in_mask(self.segmentation_file(dataset_id, subject_id))
+        return labels_in_mask(self.segmentation_file(dataset_id, subject_id, scan_id))
+
+
+def _origins(segmentation) -> dict:
+    """Label -> origin, from a mapping or from label names, each of origin ``source``."""
+    if segmentation is None:
+        return {}
+    if isinstance(segmentation, dict):
+        return dict(segmentation)
+    return {label: "source" for label in segmentation}
 
 
 def close_logging(store) -> None:
@@ -324,11 +367,12 @@ class QCTestCase(unittest.TestCase):
             QCStore(dataset_root=self.dataset_root, credentials_dir=credentials_dir or self.credentials_dir, config=config)
         )
 
-    def default_dataset(self, n_subjects: int = 3, dataset_id: int = 1) -> None:
-        """One dataset whose subjects all carry segmentations not reviewed yet (status 1)."""
+    def default_dataset(self, n_scans: int = 3, dataset_id: int = 1) -> None:
+        """One dataset of ``n_scans`` subjects, a scan each, whose segmentations came with the
+        source and nobody has reviewed yet."""
         self.builder.add_dataset(dataset_id)
-        for subject_id in range(1, n_subjects + 1):
-            self.builder.add_subject(dataset_id, subject_id, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        for subject_id in range(1, n_scans + 1):
+            self.builder.add_scan(dataset_id, subject_id, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
 
     def upload_path(self) -> Path:
         """A fresh path for an upload, outside the dataset folder."""
@@ -337,17 +381,17 @@ class QCTestCase(unittest.TestCase):
     def upload_file(self, labels, shape=SHAPE, spacing=SPACING, grown=()) -> Path:
         """A segmentation as a client would submit it, written outside the dataset folder.
 
-        With the labels a subject was built with, it is the same as the stored one, voxel for
+        With the labels a scan was built with, it is the same as the stored one, voxel for
         voxel; ``grown`` labels are changed.
         """
         return write_mask(self.upload_path(), labels, shape, spacing, grown)
 
     # --- the workflow, one step at a time -----------------------------------
     def review(self, store, user, rejected=None, accepted=None, missing=None, comment=None):
-        """``user`` leases the next subject waiting for a review and judges it, as the review
+        """``user`` leases the next scan waiting for a review and judges it, as the review
         page does: the ``rejected`` labels and the ``missing`` ones, the rest accepted unless
         ``accepted`` names the ones to accept."""
-        assignment = store.next_subject(user, REVIEWER)
+        assignment = store.next_scan(user, REVIEWER)
         return store.submit(
             assignment.assignment_id,
             user,
@@ -361,9 +405,9 @@ class QCTestCase(unittest.TestCase):
         )
 
     def edit(self, store, user, labels, grown=(), confirmed=None, comment=None):
-        """``user`` leases the next subject waiting for an editor and uploads ``labels``, as 3D
+        """``user`` leases the next scan waiting for an editor and uploads ``labels``, as 3D
         Slicer does; ``grown`` are the labels the correction changed."""
-        assignment = store.next_subject(user, EDITOR)
+        assignment = store.next_scan(user, EDITOR)
         return store.submit(
             assignment.assignment_id,
             user,
@@ -374,12 +418,17 @@ class QCTestCase(unittest.TestCase):
         )
 
     def dataset_state(self, dataset_id: int = 1) -> tuple:
-        """Everything a verdict must leave alone until approval: each Subject_info file, every
-        segmentation file's bytes, and whether the dataset's quality-check log exists."""
-        dataset = self.dataset_root / f"Dataset_{str(dataset_id).zfill(DATASET_ZFILL)}"
+        """Everything a verdict must leave alone until approval: the bytes of every file of the
+        dataset -- each scan.json and segmentation among them -- and whether the dataset's
+        quality-check log exists."""
+        dataset = layout.dataset_path(self.dataset_root, dataset_id)
         files = {
             path.relative_to(self.dataset_root).as_posix(): path.read_bytes()
             for path in sorted(dataset.rglob("*"))
-            if path.is_file() and not path.name.endswith("_qualitycheck.log")
+            if path.is_file()
         }
         return files, self.builder.dataset_log(dataset_id).exists()
+
+    def reviewed(self, store, dataset_id: int = 1, subject_id: int = 1, scan_id: int = 1) -> set:
+        """The labels of a scan that a server on the database has reviewed, as ``store`` reads them."""
+        return store.reviewed_labels(scan_key(dataset_id, subject_id, scan_id))

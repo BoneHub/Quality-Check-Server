@@ -10,6 +10,7 @@ from qc_server.config import (
     DEFAULT_CREDENTIALS_DIR,
     ENV_PREFIX,
     QCServerConfig,
+    origin_matches,
     resolve_credentials_dir,
     resolve_dataset_root,
     resolve_state_root,
@@ -25,31 +26,45 @@ class ConfigDefaultsTests(unittest.TestCase):
 
     def test_defaults_match_the_intended_policy(self):
         config = QCServerConfig()
-        # Segmentations nobody has reviewed yet (status 1) are what needs reviewing.
-        self.assertEqual(config.eligible_label_values, [1])
-        self.assertTrue(config.mark_removed_labels_absent)
-        self.assertFalse(config.include_subjects_without_segmentation)
+        # Labels nobody has reviewed yet, whatever their origin, are what needs reviewing.
+        self.assertEqual(config.eligible_review_states, ["not_reviewed"])
+        self.assertIsNone(config.eligible_origins)
+        self.assertFalse(config.include_scans_without_segmentation)
         self.assertTrue(config.edits_need_review, "an editor's correction goes back to a reviewer")
         self.assertIsNone(config.allowed_dataset_ids)
         self.assertEqual(config.assignment_strategy, "sequential")
 
-    def test_rejects_a_label_status_the_schema_does_not_define(self):
+    def test_rejects_a_review_state_that_does_not_exist(self):
         with self.assertRaises(ValueError):
-            QCServerConfig(eligible_label_values=[7])
+            QCServerConfig(eligible_review_states=["half_reviewed"])
         with self.assertRaises(ValueError):
-            QCServerConfig(eligible_label_values=[3])
+            QCServerConfig(eligible_review_states=[2])
 
-    def test_rejects_queueing_on_labels_that_have_no_segmentation(self):
-        """Status 0 is 'not available': there is nothing to review."""
+    def test_rejects_an_empty_list_of_review_states(self):
         with self.assertRaises(ValueError):
-            QCServerConfig(eligible_label_values=[0])
+            QCServerConfig(eligible_review_states=[])
 
-    def test_rejects_an_empty_eligible_list(self):
-        with self.assertRaises(ValueError):
-            QCServerConfig(eligible_label_values=[])
+    def test_review_states_are_de_duplicated_and_in_order(self):
+        config = QCServerConfig(eligible_review_states=["reviewed", "not_reviewed", "reviewed"])
+        self.assertEqual(config.eligible_review_states, ["not_reviewed", "reviewed"])
 
-    def test_eligible_values_are_de_duplicated_and_sorted(self):
-        self.assertEqual(QCServerConfig(eligible_label_values=[2, 1, 2]).eligible_label_values, [1, 2])
+    def test_origins_are_kinds_models_or_full_origins(self):
+        config = QCServerConfig(eligible_origins=["model", " source", "model:TotalSegmentator@2.4.0", "model"])
+        self.assertEqual(config.eligible_origins, ["model", "model:TotalSegmentator@2.4.0", "source"])
+        for wrong in (["models"], ["model:"], ["source:x"], ["manual@1"], []):
+            with self.subTest(origins=wrong), self.assertRaises(ValueError):
+                QCServerConfig(eligible_origins=wrong)
+
+    def test_an_origin_matches_its_kind_its_model_and_itself(self):
+        origin = "model:TotalSegmentator@2.4.0"
+        self.assertTrue(origin_matches(origin, None))
+        self.assertTrue(origin_matches(origin, ["model"]))
+        self.assertTrue(origin_matches(origin, ["model:TotalSegmentator"]))
+        self.assertTrue(origin_matches(origin, [origin]))
+        self.assertFalse(origin_matches(origin, ["model:TotalSeg"]))
+        self.assertFalse(origin_matches(origin, ["source", "manual"]))
+        self.assertTrue(origin_matches("manual", ["source", "manual"]))
+        self.assertFalse(origin_matches(None, ["source"]), "a label scan.json does not list has no origin")
 
     def test_rejects_unknown_fields(self):
         with self.assertRaises(ValueError):
@@ -64,7 +79,8 @@ class ConfigPersistenceTests(QCTestCase):
     def test_save_then_load_round_trips(self):
         path = self.tmp_path / "config.json"
         original = QCServerConfig(
-            eligible_label_values=[1, 2],
+            eligible_review_states=["not_reviewed", "reviewed"],
+            eligible_origins=["model", "source"],
             allowed_dataset_ids=[3, 7],
             assignment_strategy="random",
             edits_need_review=False,
@@ -124,6 +140,34 @@ class ConfigEnvironmentOverrideTests(QCTestCase):
         QCServerConfig(lease_ttl_seconds=999).save(path)
         os.environ[f"{ENV_PREFIX}LEASE_TTL_SECONDS"] = ""
         self.assertEqual(QCServerConfig.load(path).lease_ttl_seconds, 999)
+
+    def test_review_states_and_origins_are_lists(self):
+        path = self.tmp_path / "config.json"
+        os.environ[f"{ENV_PREFIX}ELIGIBLE_REVIEW_STATES"] = "reviewed"
+        os.environ[f"{ENV_PREFIX}ELIGIBLE_ORIGINS"] = "model:TotalSegmentator, source"
+        config = QCServerConfig.load(path)
+        self.assertEqual(config.eligible_review_states, ["reviewed"])
+        self.assertEqual(config.eligible_origins, ["model:TotalSegmentator", "source"])
+
+    def test_a_setting_of_the_label_statuses_stops_the_server_with_what_replaced_it(self):
+        """A .env written for BoneHub data schema 0.3 must not be half obeyed: a second-review
+        server would silently review the labels nobody has reviewed instead."""
+        path = self.tmp_path / "config.json"
+        for name, said in (
+            ("ELIGIBLE_LABEL_VALUES", "ELIGIBLE_REVIEW_STATES"),
+            ("INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION", "INCLUDE_SCANS_WITHOUT_SEGMENTATION"),
+            ("MARK_REMOVED_LABELS_ABSENT", "scan.json"),
+        ):
+            with self.subTest(variable=name):
+                clear_qc_env()
+                os.environ[f"{ENV_PREFIX}{name}"] = "2"
+                with self.assertRaises(ValueError) as ctx:
+                    QCServerConfig.load(path)
+                self.assertIn(f"{ENV_PREFIX}{name}", str(ctx.exception))
+                self.assertIn(said, str(ctx.exception))
+        clear_qc_env()
+        os.environ[f"{ENV_PREFIX}ELIGIBLE_LABEL_VALUES"] = ""
+        QCServerConfig.load(path)  # left blank, as an old .env.example has it: no harm done
 
     def test_falsey_words_all_turn_a_flag_off(self):
         path = self.tmp_path / "config.json"

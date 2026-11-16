@@ -1,7 +1,7 @@
-"""What a reviewer is sent of each subject: the image, the segmentation, or both.
+"""What a reviewer is sent of each scan: the image, the segmentation, or both.
 
 Requirement under test: "an option in the admin panel for the reviewers to say what data they
-will receive for each subject, only segmentations? only images? or both". The option is the
+will receive for each scan, only segmentations? only images? or both". The option is the
 account's ``data_access``. A file a reviewer is not sent is left out of the handout and refused
 at its download endpoint, so the restriction holds for any client, not only the review page.
 """
@@ -24,7 +24,7 @@ from tests.test_api import ApiTestCase
 class AccountTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=1)
+        self.default_dataset(n_scans=1)
         self.store = self.make_store()
 
     def test_a_reviewer_is_sent_both_by_default(self):
@@ -73,7 +73,7 @@ class AccountTests(QCTestCase):
 
 
 class HandoutAndDownloadTests(ApiTestCase):
-    """What each kind of account is told about a subject, and may download."""
+    """What each kind of account is told about a scan, and may download."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -84,14 +84,14 @@ class HandoutAndDownloadTests(ApiTestCase):
         return self.client.get(f"/api/v1/assignments/{handout['assignment_id']}/{what}", headers=self.headers(key))
 
     def test_a_reviewer_sent_both_gets_both(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         self.assertEqual(handout["data_access"], "image_and_segmentation")
         self.assertTrue(handout["has_image"] and handout["has_segmentation"])
         self.assertEqual(self.download(self.alice_key, handout, "image").status_code, 200)
         self.assertEqual(self.download(self.alice_key, handout, "segmentation").status_code, 200)
 
     def test_a_reviewer_sent_the_segmentation_only_gets_no_image(self):
-        handout = self.next_subject(self.sam_key)
+        handout = self.next_scan(self.sam_key)
         self.assertEqual(handout["data_access"], "segmentation")
         self.assertFalse(handout["has_image"])
         self.assertIsNone(handout["image_url"])
@@ -104,7 +104,7 @@ class HandoutAndDownloadTests(ApiTestCase):
         self.assertEqual(self.download(self.sam_key, handout, "segmentation").status_code, 200)
 
     def test_a_reviewer_sent_the_image_only_gets_no_segmentation(self):
-        handout = self.next_subject(self.ian_key)
+        handout = self.next_scan(self.ian_key)
         self.assertEqual(handout["data_access"], "image")
         self.assertTrue(handout["has_image"])
         self.assertFalse(handout["has_segmentation"])
@@ -117,13 +117,14 @@ class HandoutAndDownloadTests(ApiTestCase):
         self.assertIn("image only", refused.json()["detail"])
         self.assertEqual(self.download(self.ian_key, handout, "image").status_code, 200)
 
-    def test_what_subject_info_says_is_sent_to_everyone(self):
-        """The label statuses are metadata, not the segmentation itself."""
-        handout = self.next_subject(self.ian_key)
-        self.assertEqual(handout["segmentation_labels"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+    def test_what_scan_json_says_is_sent_to_everyone(self):
+        """The origins of the labels are metadata, not the segmentation itself."""
+        handout = self.next_scan(self.ian_key)
+        self.assertEqual(handout["segmentation_labels"], {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "source"})
+        self.assertEqual(handout["scan_info"]["segmentation"], {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "source"})
 
     def test_a_change_takes_effect_on_a_subject_already_held(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         self.client.patch("/admin/api/users/alice", json={"data_access": "segmentation"}, headers=self.admin_headers)
         self.assertEqual(self.download(self.alice_key, handout, "image").status_code, 403)
         again = self.client.get(f"/api/v1/assignments/{handout['assignment_id']}", headers=self.headers(self.alice_key))
@@ -132,28 +133,28 @@ class HandoutAndDownloadTests(ApiTestCase):
     def test_ping_reports_the_setting(self):
         body = self.client.get("/api/v1/ping", headers=self.headers(self.sam_key)).json()
         self.assertEqual(body["data_access"], "segmentation")
-        self.assertIn("mark_removed_labels_absent", body)
+        self.assertIn("edits_need_review", body)
 
 
 class QueueTests(QCTestCase):
     def test_a_user_sent_the_segmentation_only_skips_subjects_without_one(self):
         """They would have nothing at all to look at."""
-        self.builder.add_subject(1, 1, segmentation=None)
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
-        store = self.make_store(QCServerConfig(include_subjects_without_segmentation=True))
+        self.builder.add_scan(1, 1, segmentation=None)
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
+        store = self.make_store(QCServerConfig(include_scans_without_segmentation=True))
         sam, _ = store.create_user("sam", data_access="segmentation")
         alice, _ = store.create_user("alice")
 
-        self.assertEqual(store.next_subject(sam, REVIEWER).subject_id, 2)
-        self.assertEqual(store.next_subject(alice, EDITOR).subject_id, 1)
+        self.assertEqual(store.next_scan(sam, REVIEWER).subject_id, 2)
+        self.assertEqual(store.next_scan(alice, EDITOR).subject_id, 1)
 
     def test_with_only_such_subjects_left_the_queue_is_empty_for_them(self):
-        self.builder.add_subject(1, 1, segmentation=None)
-        store = self.make_store(QCServerConfig(include_subjects_without_segmentation=True))
+        self.builder.add_scan(1, 1, segmentation=None)
+        store = self.make_store(QCServerConfig(include_scans_without_segmentation=True))
         sam, _ = store.create_user("sam", data_access="segmentation")
         for role in (REVIEWER, EDITOR):
             with self.assertRaises(QCError) as ctx:
-                store.next_subject(sam, role)
+                store.next_scan(sam, role)
             self.assertEqual(ctx.exception.status_code, 404, role)
 
 
@@ -193,7 +194,7 @@ class AdminPanelTests(ApiTestCase):
 class CommandLineTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=1)
+        self.default_dataset(n_scans=1)
 
     def cli(self, command: str, *argv: str) -> str:
         buffer = io.StringIO()

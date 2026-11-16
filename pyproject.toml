@@ -4,21 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qc-server"
-version = "0.4.0"
-description = "Server that distributes BoneHub subjects to reviewers in the browser and editors in 3D Slicer, and writes approved verdicts into the dataset."
+version = "1.0.0"
+description = "Server that distributes the scans of a BoneHub-format database to reviewers in the browser and editors in 3D Slicer, and writes approved verdicts into it."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
     {name = "Hamid Alavi"}
 ]
 
-# Only the data schema is taken from BoneHub-Dataset, with its [io] extra (numpy and
-# SimpleITK) for reading and writing .seg.nrrd segmentations; none of the conversion or
-# segmentation stack is pulled in. The server is written for schema 0.3 and refuses to
-# start with another (see config.WRITTEN_FOR_SCHEMA). matplotlib draws the figures of a
-# reliability study's report (qc_server.study.report).
+# The BoneHub format is taken from BoneHub-Format, with its [io] extra (numpy and SimpleITK)
+# for reading and writing .seg.nrrd segmentations; none of its converter stack is pulled in.
+# It is installed from the source archive of the repository's main branch rather than with
+# git+https: pip clones a git URL with its submodules, and the repository's converters are a
+# private submodule, which an archive leaves out. The server's major version is the format's:
+# server 1.x reads format 1.x, and refuses to start with another (see config.WRITTEN_FOR_FORMAT),
+# so a new major version of the format takes a new major version of the server. matplotlib draws
+# the figures of a reliability study's report (qc_server.study.report).
 dependencies = [
-    "bonehub-dataset[io] @ git+https://github.com/BoneHub/BoneHub-Dataset.git",
+    "bonehub-format[io] @ https://github.com/BoneHub/BoneHub-Format/archive/refs/heads/main.zip",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "python-multipart>=0.0.9",

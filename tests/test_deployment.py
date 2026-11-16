@@ -1,8 +1,8 @@
 """The container's start-up path: configuration by environment variable only.
 
 Requirement under test: "it must serve as a docker application that runs a server on a
-folder that is already in BoneHub data structure". Docker never passes command line
-arguments, so everything must be reachable through ``BONEHUB_QC_*``.
+folder that is already in BoneHub data structure" -- now the BoneHub format. Docker never
+passes command line arguments, so everything must be reachable through ``BONEHUB_QC_*``.
 """
 
 from __future__ import annotations
@@ -18,8 +18,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bonehub_format import SCHEMA_VERSION
+
+import qc_server
 from qc_server.app import create_app
-from qc_server.config import ENV_PREFIX, QCServerConfig
+from qc_server.config import ENV_PREFIX, WRITTEN_FOR_FORMAT, QCServerConfig
 
 from tests.support import QCTestCase, close_logging
 
@@ -49,11 +52,11 @@ class EnvironmentStartupTests(QCTestCase):
         return app
 
     def test_the_server_starts_from_the_environment_alone(self):
-        self.default_dataset(n_subjects=2)
+        self.default_dataset(n_scans=2)
         os.environ[f"{ENV_PREFIX}DATASET_ROOT"] = str(self.dataset_root)
         store = self.build().state.store
         self.assertEqual(store.dataset_root, self.dataset_root)
-        self.assertEqual(store.stats().eligible_subjects, 2)
+        self.assertEqual(store.stats().eligible_scans, 2)
 
     def test_state_goes_to_the_share_and_credentials_stay_in_the_container(self):
         """Two volumes: the dataset share for state, the credentials volume for secrets."""
@@ -76,7 +79,7 @@ class EnvironmentStartupTests(QCTestCase):
 
     def test_the_policy_is_taken_from_the_environment(self):
         for dataset_id in (1, 2, 3):
-            self.builder.add_subject(dataset_id, 1, segmentation={"FEMUR_LEFT": 1})
+            self.builder.add_scan(dataset_id, 1, segmentation=["FEMUR_LEFT"])
         os.environ[f"{ENV_PREFIX}DATASET_ROOT"] = str(self.dataset_root)
         os.environ[f"{ENV_PREFIX}ALLOWED_DATASET_IDS"] = "1,3"
         os.environ[f"{ENV_PREFIX}LEASE_TTL_SECONDS"] = "600"
@@ -216,6 +219,14 @@ class DeploymentFileTests(unittest.TestCase):
     def test_the_package_exposes_that_command(self):
         pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('bonehub-qc-server = "qc_server.__main__:main"', pyproject)
+
+    def test_the_servers_major_version_is_the_formats(self):
+        """Server 1.x reads BoneHub format 1.x: the package, the code and the installed format agree."""
+        pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertEqual(re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1), qc_server.__version__)
+        major = qc_server.__version__.split(".")[0]
+        self.assertEqual(WRITTEN_FOR_FORMAT, major)
+        self.assertEqual(SCHEMA_VERSION.split(".")[0], major)
 
     def test_the_state_folder_is_not_committed(self):
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")

@@ -499,7 +499,7 @@
         <code>docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key</code>.
       </p>
       <p class="muted" style="margin-bottom:0">
-        Reviewing subjects? Open the <a href="/review">review page</a> instead. Correcting them? Use the
+        Reviewing scans? Open the <a href="/review">review page</a> instead. Correcting them? Use the
         BoneHub Quality Check extension in 3D Slicer.
       </p>
     </section>
@@ -534,14 +534,14 @@
               <label for="stSeed">Seed</label>
               <div class="inputs">
                 <input id="stSeed" type="number" min="0" step="1" style="width:100%"
-                  title="Fixes the random pick of subjects, the raters' codes, each rater's order and the confidence intervals">
+                  title="Fixes the random pick of scans, the raters' codes, each rater's order and the confidence intervals">
                 <button class="small" id="stSeedBtn" title="Fill in a random seed">Pick one</button>
               </div>
             </div>
           </div>
           <div class="row" style="margin-top:12px">
             <div style="flex:0 0 auto">
-              <label id="stModeLabel">Subjects</label>
+              <label id="stModeLabel">Scans</label>
               <div class="checks" role="radiogroup" aria-labelledby="stModeLabel">
                 <label class="inline"><input type="radio" name="stMode" id="stModeRandom" checked> A random pick</label>
                 <label class="inline"><input type="radio" name="stMode" id="stModeList"> A list I type</label>
@@ -558,8 +558,8 @@
               </div>
             </div>
             <div id="stListBox" style="flex:3 1 320px" hidden>
-              <label for="stKeys">Subject ids</label>
-              <textarea id="stKeys" rows="3" placeholder="001_000003, 001_000017, 2_45" style="width:100%"></textarea>
+              <label for="stKeys">Scan ids</label>
+              <textarea id="stKeys" rows="3" placeholder="ds-0001/sub-000003/scan-01, 1/17/1, 27/45/2" style="width:100%"></textarea>
             </div>
           </div>
           <div style="margin-top:12px">
@@ -570,20 +570,20 @@
             <div>
               <label for="stReadings">Readings per rater</label>
               <input id="stReadings" type="number" min="1" max="20" value="2" style="width:100%"
-                title="How many times each rater reads each subject. With 1, only inter-rater results are computed">
+                title="How many times each rater reads each scan. With 1, only inter-rater results are computed">
             </div>
             <div>
               <label for="stGap">Minimum gap</label>
-              <input id="stGap" type="number" min="0" placeholder="half the subjects" style="width:100%"
-                title="At least this many other readings between a rater's two readings of the same subject">
+              <input id="stGap" type="number" min="0" placeholder="half the scans" style="width:100%"
+                title="At least this many other readings between a rater's two readings of the same scan">
             </div>
             <div>
               <label for="stBootstrap">Bootstrap samples</label>
               <input id="stBootstrap" type="number" min="100" max="100000" value="2000" style="width:100%"
-                title="How many resamples of the subjects each 95% confidence interval is computed from">
+                title="How many resamples of the scans each 95% confidence interval is computed from">
             </div>
             <div>
-              <label class="inline" style="margin-top:22px"><input type="checkbox" id="stShowId"> Show subject ids to
+              <label class="inline" style="margin-top:22px"><input type="checkbox" id="stShowId"> Show scan ids to
                 raters</label>
             </div>
           </div>
@@ -593,7 +593,7 @@
           </div>
           <p class="muted" style="margin:8px 0 0">
             <strong>Preview</strong> saves these settings and shows what they make of the study.
-            <strong>Start</strong> fixes them, copies the subjects' segmentations and gives each rater a code and a
+            <strong>Start</strong> fixes them, copies the scans' segmentations and gives each rater a code and a
             list of readings. Raters work on the review page, with the invite link of a user of this server.
           </p>
           <div id="stPreview"></div>
@@ -642,12 +642,12 @@
         <h2>Approvals</h2>
         <p class="muted" style="margin-top:0">
           Reviewers' and editors' verdicts wait here. Nothing is written into the dataset until you approve a
-          subject: its accepted labels then become reviewed (status 2) in <code>Subject_info</code>, and an editor's
-          correction replaces the dataset's segmentation, which is backed up first. Tick the subjects listed, then
-          approve them, close them, or send them to the reviewers or the editors, each time with a remark for their
-          <code>Subject_info</code> if you like. A subject a reviewer rejected as a whole — a poor or cropped image, an
-          implant — waits here too: close it with a remark saying why, which is all that is written into its
-          <code>Subject_info</code>.
+          scan: an editor's correction then replaces its segmentation, which is backed up first, the labels the
+          editor drew are recorded as <code>manual</code> in its <code>scan.json</code>, and its accepted labels
+          become reviewed, for every server on the database. Tick the scans listed, then approve them, close them,
+          or send them to the reviewers or the editors, each time with a remark for their <code>scan.json</code> if
+          you like. A scan a reviewer rejected as a whole — a poor or cropped image, an implant — waits here too:
+          close it with a remark saying why, which is all that is written into its <code>scan.json</code>.
         </p>
         <div class="row" style="margin-bottom:12px">
           <div style="flex:0 0 auto">
@@ -655,7 +655,7 @@
             <select id="stageFilter">
               <option value="approval">waiting for approval</option>
               <option value="escalated">escalated by an editor</option>
-              <option value="rejected">rejected subjects</option>
+              <option value="rejected">rejected scans</option>
               <option value="review">waiting for a reviewer</option>
               <option value="edit">waiting for an editor</option>
               <option value="applied">approved</option>
@@ -666,29 +666,29 @@
           <div style="flex:0 1 260px">
             <label for="commentFilter">Comments containing</label>
             <input id="commentFilter" type="search" placeholder="hip implant" autocomplete="off" style="width:100%"
-              title="Any comment in the subject's history, by a reviewer, an editor or you; case is ignored">
+              title="Any comment in the scan's history, by a reviewer, an editor or you; case is ignored">
           </div>
           <div style="flex:1 1 0"></div>
           <!-- One group, which moves to a line of its own as a whole when the panel is narrow. -->
           <div class="row" style="flex:0 0 auto; align-items:center">
             <span class="muted nowrap" id="tickedCount">0 ticked</span>
             <button class="primary" id="approveTickedBtn" disabled
-              title="Write the ticked subjects into the dataset">Approve…</button>
+              title="Write the ticked scans into the dataset">Approve…</button>
             <button id="closeTickedBtn" disabled
-              title="Finish the ticked subjects without writing their labels or segmentations">Close…</button>
+              title="Finish the ticked scans without writing their labels or segmentations">Close…</button>
             <button id="toReviewersBtn" disabled
-              title="Every verdict on the ticked subjects is reviewed again">To reviewers…</button>
+              title="Every verdict on the ticked scans is reviewed again">To reviewers…</button>
             <button id="toEditorsBtn" disabled
-              title="An editor corrects the ticked subjects, with your comment">To editors…</button>
+              title="An editor corrects the ticked scans, with your comment">To editors…</button>
           </div>
         </div>
         <div class="scroll">
           <table>
             <thead>
               <tr>
-                <th class="tick"><input type="checkbox" id="tickAll" disabled aria-label="Tick every subject listed"
-                    title="Tick every subject listed"></th>
-                <th>Subject</th>
+                <th class="tick"><input type="checkbox" id="tickAll" disabled aria-label="Tick every scan listed"
+                    title="Tick every scan listed"></th>
+                <th>Scan</th>
                 <th>Stage</th>
                 <th>Labels</th>
                 <th>Segmentation</th>
@@ -724,7 +724,7 @@
           <div>
             <label for="newAccess">Sent to the user</label>
             <select id="newAccess" style="width:100%"
-              title="What the user is sent of each subject. A file they are not sent is refused to them.">
+              title="What the user is sent of each scan. A file they are not sent is refused to them.">
               <option value="image_and_segmentation">Image + segmentation</option>
               <option value="segmentation">Segmentation only</option>
               <option value="image">Image only</option>
@@ -737,7 +737,7 @@
           <button class="primary" id="createBtn">Create &amp; issue key</button>
         </div>
         <p class="muted qc-only" style="margin:8px 0 0">
-          A reviewer accepts or rejects each label of a subject in the browser, on the review page. An editor
+          A reviewer accepts or rejects each label of a scan in the browser, on the review page. An editor
           corrects what reviewers rejected, in 3D Slicer. A user can be both, but never reviews their own
           correction.
         </p>
@@ -799,7 +799,7 @@
           <table>
             <thead>
               <tr>
-                <th>Subject</th>
+                <th>Scan</th>
                 <th>User</th>
                 <th>Role</th>
                 <th>State</th>
@@ -822,7 +822,7 @@
               <tr>
                 <th>Time</th>
                 <th>Kind</th>
-                <th>Subject</th>
+                <th>Scan</th>
                 <th>User</th>
                 <th>Detail</th>
               </tr>
@@ -836,9 +836,18 @@
         <h2>Policy</h2>
         <div class="row">
           <div>
-            <label for="cfgEligible">Eligible label statuses</label>
-            <input id="cfgEligible" placeholder="1" title="1 = not reviewed, 2 = reviewed (comma-separated)"
-              style="width:100%">
+            <label for="cfgReviewStates">Labels to review</label>
+            <select id="cfgReviewStates" style="width:100%"
+              title="Whether a server on this database has reviewed a label already: a second review takes those">
+              <option value="not_reviewed">not reviewed yet</option>
+              <option value="reviewed">reviewed already (a second review)</option>
+              <option value="not_reviewed,reviewed">both</option>
+            </select>
+          </div>
+          <div>
+            <label for="cfgOrigins">Of origin</label>
+            <input id="cfgOrigins" placeholder="any" style="width:100%"
+              title="The labels' origins in scan.json, comma-separated: source, manual, model, derived, or a model by name such as model:TotalSegmentator. Blank: any">
           </div>
           <div>
             <label for="cfgLease">Lease TTL (seconds)</label>
@@ -853,11 +862,9 @@
           </div>
         </div>
         <div class="row" style="margin-top:12px">
-          <div><label title="Off: the labels an editor vouches for are accepted as they are, and the subject waits for approval">
+          <div><label title="Off: the labels an editor vouches for are accepted as they are, and the scan waits for approval">
               <input type="checkbox" id="cfgEditsReview"> Editors' corrections go back to a reviewer</label></div>
-          <div><label><input type="checkbox" id="cfgNoSeg"> Queue subjects without segmentation</label></div>
-          <div><label title="On approval, a label no longer in the segmentation becomes 0, not available">
-              <input type="checkbox" id="cfgRemoved"> Mark removed labels not available</label></div>
+          <div><label><input type="checkbox" id="cfgNoSeg"> Queue scans without segmentation</label></div>
           <div><label><input type="checkbox" id="cfgGeometry"> Require geometry match</label></div>
           <div><label><input type="checkbox" id="cfgBackups"> Keep segmentation backups</label></div>
           <button class="primary" id="saveCfgBtn">Save policy</button>
@@ -867,7 +874,7 @@
     </div>
   </div>
 
-  <!-- What the administrator has to say about the ticked subjects, before acting on them. -->
+  <!-- What the administrator has to say about the ticked scans, before acting on them. -->
   <dialog id="actDialog">
     <form method="dialog">
       <h3 id="actTitle"></h3>
@@ -877,7 +884,7 @@
         <textarea id="actComment" rows="3"></textarea>
       </div>
       <div class="field">
-        <label for="actRemark">Remark to add to their <code>Subject_info</code>, as “QC: …” (optional)</label>
+        <label for="actRemark">Remark to add to their <code>scan.json</code>, as “QC: …” (optional)</label>
         <input id="actRemark" autocomplete="off" placeholder="Hip implant">
       </div>
       <div class="buttons">
@@ -892,12 +899,12 @@
       "use strict";
 
       var KEY_STORAGE = "bonehub_qc_admin_key";
-      var CASES_LIMIT = 300;  // subjects listed under Approvals at most, the most recently changed
+      var CASES_LIMIT = 300;  // scans listed under Approvals at most, the most recently changed
       var adminKey = null;
       var mode = "qc";  // what the server is for, as /admin/api/session says: "qc", or "study"
       var config = {};
       var usersByName = {};  // as last listed, for the roles of a user whose key is rotated
-      var listedCases = {};  // subject key -> case as last listed, for the stage and revision of a ticked one
+      var listedCases = {};  // scan key -> case as last listed, for the stage and revision of a ticked one
       var casesStale = false;  // the filters changed, or the list is loading: the list shown is not theirs yet
       var listedUsers = [];  // as last listed, for the study's choice of raters
       var study = { state: "none" };  // the study as last listed, on a study server
@@ -910,14 +917,14 @@
         ["editor", "Editor", "Corrects what reviewers reject, in 3D Slicer"]
       ];
 
-      // What a user is sent of each subject (User.data_access on the server).
+      // What a user is sent of each scan (User.data_access on the server).
       var ACCESS_OPTIONS = [
         ["image_and_segmentation", "Image + segmentation"],
         ["segmentation", "Segmentation only"],
         ["image", "Image only"]
       ];
 
-      // Where a subject stands (Case.stage), in words.
+      // Where a scan stands (Case.stage), in words.
       var STAGE_TEXT = {
         review: "to review",
         edit: "to edit",
@@ -1033,7 +1040,7 @@
         var cells = [
           ["Awaiting approval", stats.awaiting_approval, stats.awaiting_approval > 0],
           ["Escalated", stats.escalated, stats.escalated > 0],
-          ["Rejected subjects", stats.rejected_subjects, stats.rejected_subjects > 0],
+          ["Rejected scans", stats.rejected_scans, stats.rejected_scans > 0],
           ["To review", stats.to_review],
           ["To edit", stats.to_edit],
           ["Out now", stats.assigned],
@@ -1041,8 +1048,8 @@
           ["Approved", stats.applied],
           ["Closed", stats.closed],
           ["On other servers", stats.assigned_by_other_servers],
-          ["Eligible", stats.eligible_subjects],
-          ["Subjects total", stats.total_subjects]
+          ["Eligible", stats.eligible_scans],
+          ["Scans total", stats.total_scans]
         ];
         $("stats").innerHTML = cells.map(function (c) {
           return '<div class="stat' + (c[2] ? " hot" : "") + '"><div class="n">' + esc(c[1]) + '</div><div class="k">' +
@@ -1089,32 +1096,39 @@
         });
         var approval = "";
         if (c.stage === "approval") {
-          var reviewed = names.filter(function (n) { return c.labels[n].state === "accepted"; });
+          // As the server's workflow.reviewed_after and approval_origins have it.
+          var before = c.reviewed_before || [];
+          var reviewed = names.filter(function (n) {
+            var label = c.labels[n];
+            return label.painted && (label.state === "accepted" || (before.indexOf(n) >= 0 && !label.drawn));
+          });
+          var drawn = names.filter(function (n) { return c.labels[n].painted && c.labels[n].drawn; });
           var gone = names.filter(function (n) { return !c.labels[n].painted; });
           approval = '<div class="muted" style="margin-top:4px">On approval: ' +
-            (reviewed.length ? esc(reviewed.length) + " set to 2" : "no label set to 2") +
-            (gone.length && config.mark_removed_labels_absent ? "; " + esc(gone.join(", ")) + " set to 0" : "") + "</div>";
+            (reviewed.length ? esc(reviewed.length) + " reviewed" : "no label reviewed") +
+            (drawn.length ? "; " + esc(drawn.join(", ")) + " recorded as manual" : "") +
+            (gone.length ? "; " + esc(gone.join(", ")) + " left out of scan.json" : "") + "</div>";
         }
         return "<details><summary>" + esc(summary || "no labels") + "</summary><ul>" + items.join("") + "</ul></details>" + approval;
       }
 
-      // A step of a subject's history, in words: "rita reviewed".
+      // A step of a scan's history, in words: "rita reviewed".
       function stepText(e) {
         var what = {
-          review: "reviewed", reject: "rejected the subject", edit: "corrected", escalate: "could not correct it",
+          review: "reviewed", reject: "rejected the scan", edit: "corrected", escalate: "could not correct it",
           approve: "approved",
           "return": "sent it back", close: "closed"
         }[e.action] || e.action;
         return e.by + " " + what;
       }
 
-      // What a step says: its comment, and the remark it added to Subject_info when that is not
+      // What a step says: its comment, and the remark it added to scan.json when that is not
       // its comment already. With a needle, the words found are marked.
       function stepNotes(e, needle) {
         var show = needle ? function (text) { return highlight(text, needle); } : esc;
         var remark = e.details && e.details.remark;
         return (e.comment ? '<div class="quote">“' + show(e.comment) + "”</div>" : "") +
-          (remark && remark !== e.comment ? '<div class="muted">Subject_info: “' + show(remark) + "”</div>" : "");
+          (remark && remark !== e.comment ? '<div class="muted">scan.json: “' + show(remark) + "”</div>" : "");
       }
 
       function lastEventCell(c) {
@@ -1149,10 +1163,10 @@
         return out + esc(text.slice(from));
       }
 
-      // A subject can be ticked when nobody holds it and it is not approved already.
+      // A scan can be ticked when nobody holds it and it is not approved already.
       function tickable(c) { return c.stage !== "applied" && !c.leased_to; }
 
-      // A tick outlives a new list only while its subject is in it, unchanged since it was ticked.
+      // A tick outlives a new list only while its scan is in it, unchanged since it was ticked.
       function renderCases(cases) {
         var stage = $("stageFilter").value;
         var needle = $("commentFilter").value.trim();
@@ -1162,10 +1176,10 @@
           if (box.checked && listedCases[key]) { ticked[key] = listedCases[key].revision; }
         });
         listedCases = {};
-        cases.forEach(function (c) { listedCases[c.subject_key] = c; });
+        cases.forEach(function (c) { listedCases[c.scan_key] = c; });
         casesStale = false;
         $("latestHead").textContent = needle ? "Matching comments" : "Latest";
-        $("casesNote").textContent = "Only the " + CASES_LIMIT + " most recently changed subjects are listed. " +
+        $("casesNote").textContent = "Only the " + CASES_LIMIT + " most recently changed scans are listed. " +
           "Narrow the list to see the others.";
         $("casesNote").hidden = cases.length < CASES_LIMIT;
         if (!cases.length) {
@@ -1176,11 +1190,11 @@
           return;
         }
         $("casesBody").innerHTML = cases.map(function (c) {
-          var key = esc(c.subject_key);
+          var key = esc(c.scan_key);
           var approval = (c.events || []).filter(function (e) { return e.action === "approve"; }).pop();
           var segmentation = c.staged ? "correction by " + esc(c.edited_by)
             : approval && approval.details.segmentation_written ? "correction by " + esc(c.edited_by) + ", written into the dataset"
-              : c.base ? "the dataset's own" : "none";
+              : c.base ? "the scan's own" : "none";
           var download = (c.staged || c.base) && c.stage !== "applied"
             ? ' <button class="small" data-act="download" data-key="' + key + '" title="Download it, to look at in 3D Slicer">Download</button>'
             : "";
@@ -1206,7 +1220,7 @@
       }
 
       // The tick-all box and the buttons follow the ticks. The buttons wait while the list is not
-      // yet the one the filters ask for, so that they act only on subjects the filters keep.
+      // yet the one the filters ask for, so that they act only on scans the filters keep.
       function updateTicks() {
         var boxes = tickBoxes();
         var ticked = boxes.filter(function (box) { return box.checked; }).length;
@@ -1279,7 +1293,7 @@
           var removed = (a.removed_labels || []).length;
           return "corrected " + edited + (removed ? ", removed " + removed : "");
         }
-        if (!a.quality_check_confirmed) { return "rejected the subject"; }
+        if (!a.quality_check_confirmed) { return "rejected the scan"; }
         var accepted = (a.accepted_labels || []).length;
         var missing = (a.missing_labels || []).length;
         var rejected = (a.rejected_labels || []).length;
@@ -1293,7 +1307,7 @@
         }
         $("assignBody").innerHTML = rows.map(function (a) {
           return "<tr>" +
-            '<td class="mono">' + esc(a.subject_key) + "</td>" +
+            '<td class="mono">' + esc(a.scan_key) + "</td>" +
             "<td>" + esc(a.user) + "</td>" +
             "<td>" + esc(a.role) + "</td>" +
             '<td><span class="pill ' + esc(a.state) + '">' + esc(a.state) + "</span></td>" +
@@ -1328,7 +1342,7 @@
             if ((e.edited_labels || []).length) { parts.push("corrected " + names(e.edited_labels)); }
             if ((e.removed_labels || []).length) { parts.push("removed " + names(e.removed_labels)); }
             if (e.role === "editor" && !e.quality_check_confirmed) { parts.push("could not correct it"); }
-            if (e.role === "reviewer" && !e.quality_check_confirmed) { parts.push("rejected the subject"); }
+            if (e.role === "reviewer" && !e.quality_check_confirmed) { parts.push("rejected the scan"); }
             detail = (e.role ? e.role + ": " : "") + (parts.join("; ") || "no label judged") +
               " → " + (STAGE_TEXT[e.stage] || e.stage);
             if (e.comment) { detail += " — " + e.comment; }
@@ -1346,7 +1360,7 @@
           } else if (e.kind === "user_created" || e.kind === "user_updated") {
             detail = [(e.roles || []).join(" + "), e.key_prefix ? e.key_prefix + "…" : ""].filter(Boolean).join(" · ");
           } else if (e.kind === "study_reading") {
-            detail = "rater " + e.code + ", reading " + e.position + ": " + (e.subject_rejected ? "subject rejected"
+            detail = "rater " + e.code + ", reading " + e.position + ": " + (e.scan_rejected ? "scan rejected"
               : e.accepted + " accepted, " + e.rejected + " rejected") +
               (e.comment ? " — " + e.comment : "");
           } else if (e.kind === "study_handed_out") {
@@ -1354,7 +1368,7 @@
           } else if (e.kind === "study_released") {
             detail = "reading " + e.position + " released; it comes back to the rater next";
           } else if (e.kind === "study_started") {
-            detail = "'" + e.study + "' started: " + (e.subjects || []).length + " subjects, " +
+            detail = "'" + e.study + "' started: " + (e.scans || []).length + " scans, " +
               Object.keys(e.raters || {}).length + " raters, " + e.readings_per_rater + " reading(s) each";
           } else if (e.kind === "study_ended") {
             detail = "'" + e.study + "' ended with " + e.readings + " reading(s)";
@@ -1366,7 +1380,7 @@
           return "<tr>" +
             '<td class="nowrap muted">' + esc(shortTime(e.timestamp)) + "</td>" +
             "<td>" + esc(e.kind) + "</td>" +
-            '<td class="mono">' + esc(e.subject_key || "") + "</td>" +
+            '<td class="mono">' + esc(e.scan_key || "") + "</td>" +
             "<td>" + esc(e.user || "") + "</td>" +
             '<td class="muted">' + esc(detail) + "</td></tr>";
         }).join("");
@@ -1374,12 +1388,12 @@
 
       function fillConfig(cfg) {
         config = cfg || {};
-        $("cfgEligible").value = (config.eligible_label_values || []).join(",");
+        $("cfgReviewStates").value = (config.eligible_review_states || ["not_reviewed"]).join(",");
+        $("cfgOrigins").value = (config.eligible_origins || []).join(", ");
         $("cfgLease").value = config.lease_ttl_seconds;
         $("cfgStrategy").value = config.assignment_strategy;
         $("cfgEditsReview").checked = !!config.edits_need_review;
-        $("cfgNoSeg").checked = !!config.include_subjects_without_segmentation;
-        $("cfgRemoved").checked = !!config.mark_removed_labels_absent;
+        $("cfgNoSeg").checked = !!config.include_scans_without_segmentation;
         $("cfgGeometry").checked = !!config.require_geometry_match;
         $("cfgBackups").checked = !!config.keep_segmentation_backups;
       }
@@ -1388,7 +1402,7 @@
       var refreshes = 0;
       var caseLoads = 0;
 
-      // The subjects under Approvals, as the filters above them say. Only the latest load is drawn:
+      // The scans under Approvals, as the filters above them say. Only the latest load is drawn:
       // one answered late would otherwise show the list of a filter no longer set, and its ticks.
       function loadCases() {
         var load = ++caseLoads;
@@ -1402,7 +1416,7 @@
       }
 
       // Everything is fetched again after each action. Only the latest refresh is drawn: an earlier
-      // one answered late would otherwise show a subject where it no longer is.
+      // one answered late would otherwise show a scan where it no longer is.
       function refreshAll() {
         var refresh = ++refreshes;
         var latest = function (render) {
@@ -1461,20 +1475,20 @@
         if (event.target.hasAttribute("data-tick")) { updateTicks(); }
       });
 
-      // A few subject keys for a dialog, and how many more there are.
+      // A few scan keys for a dialog, and how many more there are.
       function someKeys(keys) {
         return keys.slice(0, 8).join(", ") + (keys.length > 8 ? " and " + (keys.length - 8) + " more" : "");
       }
 
-      // The ticked subjects, as they were listed.
+      // The ticked scans, as they were listed.
       function tickedCases() {
         return tickBoxes().filter(function (box) { return box.checked; })
           .map(function (box) { return listedCases[box.getAttribute("data-tick")]; });
       }
 
-      function keysOf(cases) { return cases.map(function (c) { return c.subject_key; }); }
+      function keysOf(cases) { return cases.map(function (c) { return c.scan_key; }); }
 
-      // Asks the administrator about the ticked subjects: a remark for their Subject_info and,
+      // Asks the administrator about the ticked scans: a remark for their scan.json and,
       // when `comment` labels one, a comment for whoever gets them. Resolves to what they typed,
       // or to null when they cancel.
       function askAbout(question) {
@@ -1497,12 +1511,12 @@
 
       $("actCancel").addEventListener("click", function () { $("actDialog").close(); });
 
-      // Acts on the subjects, each only as it was listed: one that changed since is left out and
+      // Acts on the scans, each only as it was listed: one that changed since is left out and
       // reported, and so is one the server refuses. `done` names the field of the reply that says
       // which were acted on; `did` says what happened to them.
       function actOn(path, cases, fields, done, did) {
-        var body = { subject_keys: keysOf(cases), revisions: {} };
-        cases.forEach(function (c) { body.revisions[c.subject_key] = c.revision; });
+        var body = { scan_keys: keysOf(cases), revisions: {} };
+        cases.forEach(function (c) { body.revisions[c.scan_key] = c.revision; });
         Object.keys(fields).forEach(function (name) { body[name] = fields[name]; });
         casesStale = true;  // the buttons wait for the list as it is afterwards
         updateTicks();
@@ -1510,39 +1524,39 @@
           var failed = reply.results.filter(function (r) { return !r[done]; });
           if (failed.length) {
             showError(failed.length + " not " + did + ": " + failed.map(function (r) {
-              return r.subject_key + " (" + r.message + ")";
+              return r.scan_key + " (" + r.message + ")";
             }).join("; "));
           }
           if (reply[done]) {
             var had = reply.results.filter(function (r) { return r[done] && !r.remark_added; }).length;
-            showOk(reply[done] + " subject(s) " + did + "." +
+            showOk(reply[done] + " scan(s) " + did + "." +
               (fields.remark.trim() && had ? " " + had + " of them had that remark already." : ""));
           }
           return refreshAll();
         })["catch"](function (err) { showError(err.message); return refreshAll(); });
       }
 
-      // Approving a subject that does not wait for approval sets only the labels a reviewer
-      // accepted, which the dialog says first.
+      // Approving a scan that does not wait for approval makes only the labels a reviewer
+      // accepted reviewed, which the dialog says first.
       $("approveTickedBtn").addEventListener("click", function () {
         var cases = tickedCases();
         if (!cases.length) { return; }
         var early = keysOf(cases.filter(function (c) { return c.stage !== "approval"; }));
-        var lines = ["Their accepted labels become reviewed (2) in Subject_info, and editors' corrections replace " +
-          "the dataset's segmentations."];
+        var lines = ["Editors' corrections replace the scans' segmentations, the labels they drew are recorded as " +
+          "manual in scan.json, and the accepted labels become reviewed."];
         if (early.length) {
           lines.push(early.length + " of them do not wait for approval: " + someKeys(early) + ". Only the labels a " +
-            "reviewer accepted become 2; the labels nobody accepted keep their status.");
+            "reviewer accepted become reviewed; the labels nobody accepted stay as they were.");
         }
-        askAbout({ title: "Approve " + cases.length + " subject(s)?", lines: lines, ok: "Approve" }).then(function (answer) {
+        askAbout({ title: "Approve " + cases.length + " scan(s)?", lines: lines, ok: "Approve" }).then(function (answer) {
           if (!answer) { return; }
           actOn("/admin/api/cases/approve", cases, { remark: answer.remark, allow_unaccepted: early.length > 0 },
             "approved", "approved");
         });
       });
 
-      // The reason the reviewers gave for rejecting these subjects as a whole, when each is a
-      // rejected subject and they all gave the same: a closing remark starts from it.
+      // The reason the reviewers gave for rejecting these scans as a whole, when each is a
+      // rejected scan and they all gave the same: a closing remark starts from it.
       function sharedReason(cases) {
         var reasons = cases.map(function (c) {
           var rejection = (c.events || []).filter(function (e) { return e.action === "reject"; }).pop();
@@ -1551,26 +1565,26 @@
         return reasons.every(function (reason) { return reason === reasons[0]; }) ? reasons[0] : "";
       }
 
-      // A ticked subject that is closed already stays as it is.
+      // A ticked scan that is closed already stays as it is.
       $("closeTickedBtn").addEventListener("click", function () {
         var ticked = tickedCases();
         var cases = ticked.filter(function (c) { return c.stage !== "closed"; });
         var closed = keysOf(ticked.filter(function (c) { return c.stage === "closed"; }));
-        if (!cases.length) { showError("The ticked subjects are closed already."); return; }
+        if (!cases.length) { showError("The ticked scans are closed already."); return; }
         var lines = ["Their labels and segmentations are not written into the dataset, and they are not handed out " +
           "again unless you send them to the reviewers or the editors."];
         if (closed.length) {
-          lines.push(closed.length + " of the ticked subjects are closed already and stay as they are: " +
+          lines.push(closed.length + " of the ticked scans are closed already and stay as they are: " +
             someKeys(closed) + ".");
         }
-        askAbout({ title: "Close " + cases.length + " subject(s)?", lines: lines, ok: "Close", remark: sharedReason(cases) })
+        askAbout({ title: "Close " + cases.length + " scan(s)?", lines: lines, ok: "Close", remark: sharedReason(cases) })
           .then(function (answer) {
             if (!answer) { return; }
             actOn("/admin/api/cases/close", cases, { remark: answer.remark }, "closed", "closed");
           });
       });
 
-      // Sending a closed subject back reopens it.
+      // Sending a closed scan back reopens it.
       function sendTicked(to) {
         var cases = tickedCases();
         if (!cases.length) { return; }
@@ -1582,7 +1596,7 @@
           lines.push(closed.length + " of them are closed, and are reopened: " + someKeys(closed) + ".");
         }
         askAbout({
-          title: "Send " + cases.length + " subject(s) to the " + whom + "?",
+          title: "Send " + cases.length + " scan(s) to the " + whom + "?",
           lines: lines,
           comment: to === "review" ? "Comment for the reviewers (optional)" : "What should the editors correct? (optional)",
           ok: "Send"
@@ -1596,9 +1610,11 @@
       $("toReviewersBtn").addEventListener("click", function () { sendTicked("review"); });
       $("toEditorsBtn").addEventListener("click", function () { sendTicked("edit"); });
 
-      // A subject's segmentation, fetched with the admin key and handed to the browser as a file.
+      // A scan's segmentation, fetched with the admin key and handed to the browser as a file. The
+      // key is the scan's path, ds-0027/sub-000001/scan-01, and goes into the URL as one.
       function downloadSegmentation(key) {
-        fetch("/admin/api/cases/" + encodeURIComponent(key) + "/segmentation", { headers: { "X-Admin-Key": adminKey } })
+        var path = key.split("/").map(encodeURIComponent).join("/");
+        fetch("/admin/api/cases/" + path + "/segmentation", { headers: { "X-Admin-Key": adminKey } })
           .then(function (response) {
             if (!response.ok) { throw new Error("The segmentation of " + key + " could not be downloaded (HTTP " + response.status + ")."); }
             return response.blob();
@@ -1606,7 +1622,7 @@
           .then(function (blob) {
             var link = document.createElement("a");
             link.href = URL.createObjectURL(blob);
-            link.download = key + ".seg.nrrd";
+            link.download = key.replace(/\//g, "_") + ".seg.nrrd";
             document.body.appendChild(link);
             link.click();
             link.remove();
@@ -1734,7 +1750,7 @@
         } else if (act === "delete") {
           if (!window.confirm("Delete user '" + name + "'? " + (mode === "study"
             ? "The readings they gave stay in the study, under their code."
-            : "Their open subjects return to the queue."))) { return; }
+            : "Their open scans return to the queue."))) { return; }
           api("DELETE", "/admin/api/users/" + encodeURIComponent(name))
             .then(refreshAll)["catch"](function (err) { showError(err.message); });
         }
@@ -1748,17 +1764,16 @@
       });
 
       $("saveCfgBtn").addEventListener("click", function () {
-        var eligible = $("cfgEligible").value.split(",")
+        var origins = $("cfgOrigins").value.split(",")
           .map(function (s) { return s.trim(); })
-          .filter(Boolean)
-          .map(Number);
+          .filter(Boolean);
         api("PUT", "/admin/api/config", {
-          eligible_label_values: eligible,
+          eligible_review_states: $("cfgReviewStates").value.split(","),
+          eligible_origins: origins.length ? origins : null,
           lease_ttl_seconds: Number($("cfgLease").value),
           assignment_strategy: $("cfgStrategy").value,
           edits_need_review: $("cfgEditsReview").checked,
-          include_subjects_without_segmentation: $("cfgNoSeg").checked,
-          mark_removed_labels_absent: $("cfgRemoved").checked,
+          include_scans_without_segmentation: $("cfgNoSeg").checked,
           require_geometry_match: $("cfgGeometry").checked,
           keep_segmentation_backups: $("cfgBackups").checked
         }).then(function (cfg) {
@@ -1809,20 +1824,20 @@
         s = s || {};
         $("stName").value = s.name || "";
         $("stSeed").value = s.seed === undefined || s.seed === null ? "" : s.seed;
-        $("stModeList").checked = s.subject_mode === "list";
-        $("stModeRandom").checked = s.subject_mode !== "list";
-        $("stKeys").value = (s.subject_keys || []).join(", ");
+        $("stModeList").checked = s.scan_mode === "list";
+        $("stModeRandom").checked = s.scan_mode !== "list";
+        $("stKeys").value = (s.scan_keys || []).join(", ");
         $("stCount").value = s.random_count || "";
         $("stDatasets").value = (s.random_dataset_ids || []).join(",");
         $("stReadings").value = s.readings_per_rater || 2;
         $("stGap").value = s.min_gap === undefined || s.min_gap === null ? "" : s.min_gap;
         $("stBootstrap").value = s.bootstrap_samples || 2000;
-        $("stShowId").checked = !!s.show_subject_id;
+        $("stShowId").checked = !!s.show_scan_id;
         chosenRaters = (s.raters || []).slice();
-        updateSubjectMode();
+        updateScanMode();
       }
 
-      function updateSubjectMode() {
+      function updateScanMode() {
         var list = $("stModeList").checked;
         $("stListBox").hidden = !list;
         $("stRandomBox").hidden = list;
@@ -1863,14 +1878,14 @@
         }
         var settings = {
           name: $("stName").value.trim(),
-          subject_mode: list ? "list" : "random",
-          subject_keys: list ? $("stKeys").value.split(/[\s,;]+/).filter(Boolean) : [],
+          scan_mode: list ? "list" : "random",
+          scan_keys: list ? $("stKeys").value.split(/[\s,;]+/).filter(Boolean) : [],
           random_count: list ? null : number("stCount"),
           random_dataset_ids: list ? null : datasetIds($("stDatasets").value),
           seed: number("stSeed"),
           raters: chosenRaters.slice(),
           min_gap: number("stGap"),
-          show_subject_id: $("stShowId").checked
+          show_scan_id: $("stShowId").checked
         };
         // Left out when blank, so that the server's defaults apply.
         if (number("stReadings") !== null) { settings.readings_per_rater = number("stReadings"); }
@@ -1884,36 +1899,36 @@
       }
 
       function renderPreview(p) {
-        var subjects = p.subjects.map(function (s) {
-          return esc(s.subject_key) + ' <span class="muted">(' + esc(s.bones) + " bones)</span>";
+        var scans = p.scans.map(function (s) {
+          return esc(s.scan_key) + ' <span class="muted">(' + esc(s.bones) + " bones)</span>";
         }).join(", ");
         var raters = p.raters.map(function (r) { return esc(r.code) + " = " + esc(r.name); }).join(", ");
         var skipped = "";
         if (p.skipped_count) {
           skipped = '<div class="muted" style="margin-top:6px">Left out of the pick: ' + p.skipped.map(function (s) {
-            return esc(s.subject_key) + " (" + esc(s.reason) + ")";
+            return esc(s.scan_key) + " (" + esc(s.reason) + ")";
           }).join("; ") + (p.skipped_count > p.skipped.length ? "; and " + (p.skipped_count - p.skipped.length) + " more" : "") +
             ".</div>";
         }
         $("stPreview").innerHTML = '<div class="banner" style="margin:12px 0 0">' +
-          "<div><strong>" + p.subjects.length + " subject(s)</strong>, " + p.readings_per_rater +
+          "<div><strong>" + p.scans.length + " scan(s)</strong>, " + p.readings_per_rater +
           " reading(s) of each: every rater does <strong>" + p.readings_each + " readings</strong>" +
-          (p.readings_per_rater > 1 ? ", with at least " + p.min_gap + " others between two readings of one subject" : "") +
+          (p.readings_per_rater > 1 ? ", with at least " + p.min_gap + " others between two readings of one scan" : "") +
           ", " + p.readings_total + " in all. Saved as the draft.</div>" +
           '<div style="margin-top:6px">Raters and their codes: ' + raters + "</div>" +
-          '<div style="margin-top:6px">Subjects: ' + subjects + "</div>" + skipped + "</div>";
+          '<div style="margin-top:6px">Scans: ' + scans + "</div>" + skipped + "</div>";
       }
 
       function renderStudyRun(s) {
         var settings = s.settings;
         var rows = [
           ["Name", esc(settings.name)],
-          ["Subjects", s.subjects.length + ' <details style="display:inline"><summary>list</summary>' +
-            s.subjects.map(function (x) { return esc(x.subject_key); }).join(", ") + "</details>"],
+          ["Scans", s.scans.length + ' <details style="display:inline"><summary>list</summary>' +
+            s.scans.map(function (x) { return esc(x.scan_key); }).join(", ") + "</details>"],
           ["Raters", s.raters.length + ": " + s.raters.map(function (r) { return esc(r.code) + " = " + esc(r.name); }).join(", ")],
-          ["Readings per rater", esc(settings.readings_per_rater) + " of each subject"],
+          ["Readings per rater", esc(settings.readings_per_rater) + " of each scan"],
           ["Minimum gap", settings.readings_per_rater > 1 ? esc(s.min_gap) + " other readings" : "—"],
-          ["Subject ids shown to raters", settings.show_subject_id ? "yes" : "no"],
+          ["Scan ids shown to raters", settings.show_scan_id ? "yes" : "no"],
           ["Seed", esc(settings.seed)],
           ["Bootstrap samples", esc(settings.bootstrap_samples)],
           ["Started", esc(shortTime(s.started_at))],
@@ -1954,8 +1969,8 @@
         window.setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
       }
 
-      $("stModeList").addEventListener("change", updateSubjectMode);
-      $("stModeRandom").addEventListener("change", updateSubjectMode);
+      $("stModeList").addEventListener("change", updateScanMode);
+      $("stModeRandom").addEventListener("change", updateScanMode);
       $("stSeedBtn").addEventListener("click", function () {
         $("stSeed").value = String(Math.floor(Math.random() * 1e9));
       });
@@ -1975,7 +1990,7 @@
       $("stStartBtn").addEventListener("click", function () {
         var settings = studySettings();
         if (!window.confirm("Start the study “" + settings.name + "”? Its settings are fixed from then on: the " +
-          "subjects' segmentations are copied, and each rater gets a code and their list of readings.")) { return; }
+          "scans' segmentations are copied, and each rater gets a code and their list of readings.")) { return; }
         $("stStartBtn").disabled = true;
         api("POST", "/admin/api/study/start", settings).then(function (started) {
           $("stPreview").innerHTML = "";

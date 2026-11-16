@@ -49,7 +49,7 @@ def study_overview(request: Request, store: QCStore = Depends(require_admin)) ->
 
 @router.post("/api/study/preview")
 def preview(payload: dict, request: Request, store: QCStore = Depends(require_admin)) -> dict:
-    """Save the settings as the study's draft, and say what they make of it: the subjects, the
+    """Save the settings as the study's draft, and say what they make of it: the scans, the
     raters' codes and how many readings each has. Refused once the study has started."""
     return get_study(request).preview(_settings(payload))
 

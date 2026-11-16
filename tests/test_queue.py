@@ -1,120 +1,209 @@
-"""Which subjects the server puts in the quality-check queue.
+"""Which scans the server puts in the quality-check queue.
 
-Requirements under test: the server reads a folder that is already in BoneHub data
-structure format, and "it must work on specific datasets not all datasets in the root".
+Requirements under test: the server reads a database that is already in the BoneHub format,
+and "it must work on specific datasets not all datasets in the root".
 """
 
 from __future__ import annotations
 
+import json
+import os
 import unittest
 
-from bonehub_data_schema import __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION
 from qc_server.config import QCServerConfig
 from qc_server.models import REVIEWER
 
-from tests.support import QCTestCase
+from tests.support import EARLIER_SERVER_ID, QCTestCase, write_mask
 
 
 class IndexEligibilityTests(QCTestCase):
     def keys(self, store) -> list:
-        return [ref.subject_key for ref in store._index]
+        return [ref.scan_key for ref in store._index]
 
     def test_only_segmentations_not_reviewed_yet_are_queued(self):
         self.builder.add_dataset(1)
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})  # available, not reviewed
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2})  # already reviewed
-        self.builder.add_subject(1, 3, segmentation={"FEMUR_LEFT": 0})  # not available
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])  # nobody has reviewed it
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"], reviewed=["FEMUR_LEFT"])  # reviewed already
+        self.builder.add_scan(1, 3, segmentation=[])  # no segmentation
         store = self.make_store()
-        self.assertEqual(self.keys(store), ["001_000001"])
-        self.assertEqual(store.stats().total_subjects, 3)
-        self.assertEqual(store.stats().eligible_subjects, 1)
+        self.assertEqual(self.keys(store), ["ds-0001/sub-000001/scan-01"])
+        self.assertEqual(store.stats().total_scans, 3)
+        self.assertEqual(store.stats().eligible_scans, 1)
 
-    def test_a_subject_with_any_label_not_reviewed_is_queued(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
-        self.assertEqual(self.keys(self.make_store()), ["001_000001"])
+    def test_a_scan_with_any_label_not_reviewed_is_queued(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], reviewed=["FEMUR_LEFT"])
+        self.assertEqual(self.keys(self.make_store()), ["ds-0001/sub-000001/scan-01"])
 
-    def test_subjects_without_a_segmentation_are_skipped_by_default(self):
-        self.builder.add_subject(1, 1, segmentation=None)
+    def test_every_scan_of_a_subject_is_queued_on_its_own(self):
+        self.builder.add_scan(1, 1, 1, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 1, 2, segmentation=["FEMUR_LEFT"], reviewed=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 1, 3, segmentation=["TIBIA_LEFT"])
+        store = self.make_store()
+        self.assertEqual(self.keys(store), ["ds-0001/sub-000001/scan-01", "ds-0001/sub-000001/scan-03"])
+        self.assertEqual(store.stats().total_scans, 3)
+
+    def test_scans_without_a_segmentation_are_skipped_by_default(self):
+        self.builder.add_scan(1, 1, segmentation=None)
         self.assertEqual(self.keys(self.make_store()), [])
 
-    def test_subjects_without_a_segmentation_can_be_queued_on_request(self):
-        """So a reviewer can create a segmentation from scratch."""
-        self.builder.add_subject(1, 1, segmentation=None)
-        store = self.make_store(include_subjects_without_segmentation=True)
-        self.assertEqual(self.keys(store), ["001_000001"])
+    def test_scans_without_a_segmentation_can_be_queued_on_request(self):
+        """So an editor can create a segmentation from scratch."""
+        self.builder.add_scan(1, 1, segmentation=None)
+        store = self.make_store(include_scans_without_segmentation=True)
+        self.assertEqual(self.keys(store), ["ds-0001/sub-000001/scan-01"])
         self.assertFalse(store._index[0].has_segmentation)
 
-    def test_labels_that_are_all_not_available_make_no_segmentation(self):
-        """Status 0 is the same as the label being absent."""
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 0, "FEMUR_RIGHT": 0})
-        self.assertEqual(self.keys(self.make_store()), [])
-        store = self.make_store(include_subjects_without_segmentation=True)
-        self.assertEqual(self.keys(store), ["001_000001"])
+    def test_a_scan_with_no_image_is_never_queued(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"], image=False)
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
+        self.assertEqual(self.keys(self.make_store()), ["ds-0001/sub-000002/scan-01"])
 
-    def test_a_subject_with_no_image_is_never_queued(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1}, image=False)
-        self.assertEqual(self.keys(self.make_store()), [])
+    def test_a_scan_of_a_subject_the_converter_has_not_finished_is_skipped(self):
+        """The converter writes subject.json last: without it the subject's folder is incomplete."""
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
+        (self.builder.scan_folder(1, 2).parent / "subject.json").unlink()
+        self.assertEqual(self.keys(self.make_store()), ["ds-0001/sub-000001/scan-01"])
 
-    def test_a_subject_whose_image_file_is_missing_is_skipped(self):
-        """The metadata claims an image but the file is not there; do not hand it out."""
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1}, write_image_file=False)
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
-        self.assertEqual(self.keys(self.make_store()), ["001_000002"])
+    def test_reviewed_scans_can_be_queued_for_a_second_review(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"], reviewed=["FEMUR_LEFT"])
+        second = self.make_store(eligible_review_states=["reviewed"])
+        self.assertEqual(self.keys(second), ["ds-0001/sub-000002/scan-01"])
+        both = self.make_store(eligible_review_states=["not_reviewed", "reviewed"])
+        self.assertEqual(self.keys(both), ["ds-0001/sub-000001/scan-01", "ds-0001/sub-000002/scan-01"])
 
-    def test_reviewed_subjects_can_be_queued_for_a_second_review(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2})
-        self.assertEqual(self.keys(self.make_store(eligible_label_values=[2])), ["001_000002"])
-        self.assertEqual(self.keys(self.make_store(eligible_label_values=[1, 2])), ["001_000001", "001_000002"])
+    def test_labels_are_queued_by_their_origin_when_the_server_says_so(self):
+        self.builder.add_scan(1, 1, segmentation={"FEMUR_LEFT": "source"})
+        self.builder.add_scan(1, 2, segmentation={"FEMUR_LEFT": "manual"})
+        self.builder.add_scan(1, 3, segmentation={"FEMUR_LEFT": "source", "PATELLA_LEFT": "model:TotalSegmentator@2.4.0"})
+        self.builder.add_scan(1, 4, segmentation={"FEMUR_LEFT": "model:Other@1.0"})
+        self.assertEqual(len(self.keys(self.make_store())), 4, "every origin, by default")
+        self.assertEqual(
+            self.keys(self.make_store(eligible_origins=["model:TotalSegmentator"])), ["ds-0001/sub-000003/scan-01"]
+        )
+        self.assertEqual(
+            self.keys(self.make_store(eligible_origins=["model"])),
+            ["ds-0001/sub-000003/scan-01", "ds-0001/sub-000004/scan-01"],
+        )
+        self.assertEqual(self.keys(self.make_store(eligible_origins=["manual"])), ["ds-0001/sub-000002/scan-01"])
 
-    def test_the_queue_is_ordered_by_dataset_then_subject(self):
-        self.builder.add_subject(2, 5, segmentation={"FEMUR_LEFT": 1})
-        self.builder.add_subject(1, 9, segmentation={"FEMUR_LEFT": 1})
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
-        self.assertEqual(self.keys(self.make_store()), ["001_000002", "001_000009", "002_000005"])
+    def test_a_label_is_reviewed_only_while_its_segmentation_is_the_one_approved(self):
+        """Converting the dataset again, or another tool rewriting the mask, leaves every label of
+        the scan to be reviewed again."""
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], reviewed=["FEMUR_LEFT", "FEMUR_RIGHT"])
+        store = self.make_store()
+        self.assertEqual(self.keys(store), [])
+        self.assertEqual(self.reviewed(store), {"FEMUR_LEFT", "FEMUR_RIGHT"})
+
+        write_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        store.refresh_index()
+        self.assertEqual(self.keys(store), ["ds-0001/sub-000001/scan-01"])
+        self.assertEqual(self.reviewed(store), set())
+
+    def test_a_segmentation_copied_back_unchanged_is_still_the_one_approved(self):
+        """A copy whose time moved -- restored from a backup, or moved to another disk -- is the same file."""
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"], reviewed=["FEMUR_LEFT"])
+        path = self.builder.segmentation_file(1, 1)
+        os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 10**9))
+        store = self.make_store()
+        self.assertEqual(self.keys(store), [])
+        self.assertEqual(self.reviewed(store), {"FEMUR_LEFT"})
+
+    def test_the_latest_approval_of_a_scan_on_any_server_says_what_is_reviewed(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], reviewed=["FEMUR_LEFT", "FEMUR_RIGHT"])
+        done = self.dataset_root / ".bonehub_qc" / EARLIER_SERVER_ID / "cases_done.jsonl"
+        later = json.loads(done.read_text(encoding="utf-8"))
+        later.update(applied_at="2026-02-01T00:00:00Z", reviewed_labels=["FEMUR_LEFT"])
+        (done.parent.parent / "qc_later_server").mkdir()
+        (done.parent.parent / "qc_later_server" / "cases_done.jsonl").write_text(json.dumps(later) + "\n", encoding="utf-8")
+        store = self.make_store()
+        self.assertEqual(self.reviewed(store), {"FEMUR_LEFT"})
+        self.assertEqual(self.keys(store), ["ds-0001/sub-000001/scan-01"])
+
+    def test_a_done_file_of_another_layout_or_cut_short_is_passed_over(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"], reviewed=["FEMUR_LEFT"])
+        done = self.dataset_root / ".bonehub_qc" / EARLIER_SERVER_ID / "cases_done.jsonl"
+        with open(done, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"subject_key": "001_000001", "stage": "applied", "applied_at": "2027-01-01T00:00:00Z"}) + "\n")
+            f.write('{"scan_key": "ds-0001/sub-000001/scan-01", "stage": "app')
+        store = self.make_store()
+        self.assertEqual(self.reviewed(store), {"FEMUR_LEFT"})
+        self.assertEqual(self.keys(store), [])
+
+    def test_the_queue_is_ordered_by_dataset_then_subject_then_scan(self):
+        self.builder.add_scan(2, 5, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 9, 2, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 9, 1, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
+        self.assertEqual(
+            self.keys(self.make_store()),
+            [
+                "ds-0001/sub-000002/scan-01",
+                "ds-0001/sub-000009/scan-01",
+                "ds-0001/sub-000009/scan-02",
+                "ds-0002/sub-000005/scan-01",
+            ],
+        )
 
 
 class SchemaVersionTests(QCTestCase):
-    """Only datasets written under this server's schema are served.
+    """Only datasets written in this server's major version of the BoneHub format are served.
 
-    In another schema version the label values, the label statuses and the segmentation
-    format may all mean something else, so such a dataset is left alone entirely.
+    In another major version the layout, scan.json and the segmentation format may all mean
+    something else, so such a dataset is left alone entirely.
     """
 
     def server_log(self) -> str:
         return (self.state_dir / "server.log").read_text(encoding="utf-8")
 
-    def test_a_dataset_of_the_current_schema_is_served(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+    def test_a_dataset_of_the_current_format_is_served(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         self.assertEqual(self.make_store().stats().datasets, {1: 1})
 
-    def test_a_dataset_of_another_patch_version_is_served(self):
-        self.builder.add_dataset(1, schema_version=f"{SCHEMA_VERSION.rsplit('.', 1)[0]}.99")
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        self.assertEqual(self.make_store().stats().eligible_subjects, 1)
+    def test_a_dataset_of_an_older_minor_version_is_served(self):
+        major = SCHEMA_VERSION.split(".")[0]
+        self.builder.add_dataset(1, schema_version=f"{major}.0")
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.assertEqual(self.make_store().stats().eligible_scans, 1)
 
-    def test_a_dataset_of_an_older_schema_is_skipped(self):
-        self.builder.add_dataset(1, schema_version="0.2.0")
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 1})
+    def test_a_dataset_of_a_newer_minor_version_is_skipped(self):
+        """It may hold what this server's format package cannot read."""
+        major, minor = SCHEMA_VERSION.split(".")[:2]
+        self.builder.add_dataset(1, schema_version=f"{major}.{int(minor) + 1}")
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.assertEqual(self.make_store().stats().eligible_scans, 0)
+
+    def test_a_dataset_of_an_older_format_is_skipped(self):
+        self.builder.add_dataset(1, schema_version="0.3.0")
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(2, 1, segmentation=["FEMUR_LEFT"])
         store = self.make_store()
         self.assertEqual(store.stats().datasets, {2: 1})
-        self.assertEqual(store.stats().total_subjects, 1)
-        self.assertIn("Dataset_001", self.server_log())
-        self.assertIn("0.2.0", self.server_log())
+        self.assertEqual(store.stats().total_scans, 1)
+        self.assertIn("ds-0001", self.server_log())
+        self.assertIn("0.3.0", self.server_log())
 
-    def test_a_dataset_that_records_no_schema_version_is_skipped(self):
-        """Datasets converted before schema versions were recorded."""
+    def test_a_dataset_that_records_no_format_version_is_skipped(self):
         self.builder.add_dataset(1, schema_version=None)
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        self.assertEqual(self.make_store().stats().eligible_subjects, 0)
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.assertEqual(self.make_store().stats().eligible_scans, 0)
         self.assertIn("(not recorded)", self.server_log())
 
     def test_a_dataset_whose_info_file_is_broken_is_skipped(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 1})
-        (self.dataset_root / "Dataset_002" / "Dataset_info_002.json").write_text("{ truncated", encoding="utf-8")
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(2, 1, segmentation=["FEMUR_LEFT"])
+        (self.dataset_root / "ds-0002" / "dataset.json").write_text("{ truncated", encoding="utf-8")
         self.assertEqual(self.make_store().stats().datasets, {1: 1})
+
+    def test_a_database_of_the_old_layout_offers_nothing(self):
+        """Dataset_001 and its Subject_info file are BoneHub data schema 0.3: no dataset of this format."""
+        old = self.dataset_root / "Dataset_001"
+        old.mkdir(parents=True)
+        (old / "Subject_info_001.json").write_text("[]", encoding="utf-8")
+        self.builder.add_scan(2, 1, segmentation=["FEMUR_LEFT"])
+        self.assertEqual(self.make_store().stats().datasets, {2: 1})
 
 
 class DatasetScopeTests(QCTestCase):
@@ -123,7 +212,7 @@ class DatasetScopeTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
         for dataset_id in (1, 2, 3):
-            self.builder.add_subject(dataset_id, 1, segmentation={"FEMUR_LEFT": 1})
+            self.builder.add_scan(dataset_id, 1, segmentation=["FEMUR_LEFT"])
 
     def test_without_a_restriction_every_dataset_is_served(self):
         store = self.make_store()
@@ -138,19 +227,19 @@ class DatasetScopeTests(QCTestCase):
         store = self.make_store(allowed_dataset_ids=[2])
         _, key = store.create_user("alice")
         user = store.authenticate(key)
-        self.assertEqual(store.next_subject(user, REVIEWER).dataset_id, 2)
+        self.assertEqual(store.next_scan(user, REVIEWER).dataset_id, 2)
 
-    def test_excluded_subjects_are_not_counted_as_total_either(self):
+    def test_excluded_scans_are_not_counted_as_total_either(self):
         store = self.make_store(allowed_dataset_ids=[1])
-        self.assertEqual(store.stats().total_subjects, 1)
+        self.assertEqual(store.stats().total_scans, 1)
 
     def test_a_reviewer_can_be_restricted_further_than_the_server(self):
         store = self.make_store(allowed_dataset_ids=[1, 2])
         store.create_user("alice", allowed_dataset_ids=[2])
         _, key = store.create_user("bob")
         alice = store._users["alice"]
-        self.assertEqual(store.next_subject(alice, REVIEWER).dataset_id, 2)
-        self.assertEqual(store.next_subject(store.authenticate(key), REVIEWER).dataset_id, 1)
+        self.assertEqual(store.next_scan(alice, REVIEWER).dataset_id, 2)
+        self.assertEqual(store.next_scan(store.authenticate(key), REVIEWER).dataset_id, 1)
 
     def test_a_reviewer_cannot_reach_beyond_the_servers_own_restriction(self):
         """A per-user allowance widens nothing: the server's list is the outer bound."""
@@ -158,35 +247,39 @@ class DatasetScopeTests(QCTestCase):
         store.create_user("alice", allowed_dataset_ids=[2, 3])
         self.assertFalse(store._user_may_access(store._users["alice"], 2))
         with self.assertRaises(Exception):
-            store.next_subject(store._users["alice"])
+            store.next_scan(store._users["alice"])
 
 
 class MalformedDatasetTests(QCTestCase):
     """A broken dataset folder must not take the whole server down."""
 
-    def test_a_folder_without_a_subject_info_file_is_skipped(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        (self.dataset_root / "Dataset_002").mkdir(parents=True)
+    def test_a_folder_without_a_dataset_json_is_skipped(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        (self.dataset_root / "ds-0002").mkdir(parents=True)
         store = self.make_store()
-        self.assertEqual(store.stats().eligible_subjects, 1)
+        self.assertEqual(store.stats().eligible_scans, 1)
 
-    def test_an_unparsable_subject_info_file_is_skipped(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 1})
-        (self.dataset_root / "Dataset_002" / "Subject_info_002.json").write_text("{ truncated", encoding="utf-8")
+    def test_an_unparsable_scan_json_skips_that_scan_alone(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
+        (self.builder.scan_folder(1, 2) / "scan.json").write_text("{ truncated", encoding="utf-8")
         store = self.make_store()
-        self.assertEqual([ref.dataset_id for ref in store._index], [1])
+        self.assertEqual([ref.scan_key for ref in store._index], ["ds-0001/sub-000001/scan-01"])
+        self.assertIn("ds-0001/sub-000002/scan-01", (self.state_dir / "server.log").read_text(encoding="utf-8"))
 
-    def test_a_folder_whose_name_carries_no_dataset_id_is_skipped(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
-        (self.dataset_root / "Dataset_notanumber").mkdir(parents=True)
-        self.assertEqual(self.make_store().stats().eligible_subjects, 1)
+    def test_folders_not_named_as_the_format_names_them_are_skipped(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
+        (self.dataset_root / "ds-notanumber").mkdir(parents=True)
+        (self.dataset_root / "ds-0001" / "sub-1").mkdir()
+        (self.dataset_root / "ds-0001" / "sub-000001" / "scan-1").mkdir()
+        (self.dataset_root / "ds-0001" / "sub-000001" / "mesh").mkdir()
+        self.assertEqual(self.make_store().stats().eligible_scans, 1)
 
     def test_unrelated_folders_in_the_root_are_ignored(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         (self.dataset_root / "scratch").mkdir(parents=True)
         (self.dataset_root / "README.txt").write_text("hello", encoding="utf-8")
-        self.assertEqual(self.make_store().stats().eligible_subjects, 1)
+        self.assertEqual(self.make_store().stats().eligible_scans, 1)
 
     def test_a_dataset_root_that_does_not_exist_is_refused(self):
         with self.assertRaises(RuntimeError):
@@ -199,24 +292,24 @@ class MalformedDatasetTests(QCTestCase):
 
 
 class IndexRefreshTests(QCTestCase):
-    def test_subjects_added_on_disk_appear_after_a_refresh(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+    def test_scans_added_on_disk_appear_after_a_refresh(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         store = self.make_store(index_refresh_seconds=3600)
-        self.assertEqual(store.stats().eligible_subjects, 1)
+        self.assertEqual(store.stats().eligible_scans, 1)
 
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
         store.refresh_index()
-        self.assertEqual(store.stats().eligible_subjects, 2)
+        self.assertEqual(store.stats().eligible_scans, 2)
 
     def test_a_zero_ttl_rebuilds_the_index_on_every_request(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         store = self.make_store(index_refresh_seconds=0)
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
-        self.assertEqual(store.stats().eligible_subjects, 2)
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
+        self.assertEqual(store.stats().eligible_scans, 2)
 
 
 class StateFolderTests(QCTestCase):
-    """The server's non-secret state lives in a folder of its own inside the dataset."""
+    """The server's non-secret state lives in a folder of its own inside the database."""
 
     def test_the_state_folder_is_laid_out_on_first_start(self):
         self.default_dataset()

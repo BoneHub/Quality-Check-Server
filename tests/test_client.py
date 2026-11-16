@@ -40,11 +40,11 @@ class LiveServerTestCase(QCTestCase):
     ``self.reviewer`` is alice on the review page.
     """
 
-    n_subjects = 2
+    n_scans = 2
 
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=self.n_subjects)
+        self.default_dataset(n_scans=self.n_scans)
         with contextlib.redirect_stdout(io.StringIO()):
             self.app = create_app(dataset_root=self.dataset_root, credentials_dir=self.credentials_dir)
         self.store = self.track(self.app.state.store)
@@ -77,9 +77,9 @@ class LiveServerTestCase(QCTestCase):
         self.thread.join(timeout=15)
 
     def reject_right_femur(self, client: BoneHubQCClient | None = None) -> dict:
-        """A reviewer sends the next subject to the editors."""
+        """A reviewer sends the next scan to the editors."""
         client = client or BoneHubQCClient(self.base_url, self.bob_key, timeout=30, role=REVIEWER)
-        handout = client.next_subject()
+        handout = client.next_scan()
         return client.submit(
             handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True,
             rejected_labels=["FEMUR_RIGHT"],
@@ -94,12 +94,12 @@ class ClientHappyPathTests(LiveServerTestCase):
         self.assertIn("FEMUR_LEFT", self.client.labels()["label_name_to_value"])
 
     def test_the_whole_cycle_works(self):
-        # bob rejects the right femur of subject 1, on the review page.
+        # bob rejects the right femur of scan 1, on the review page.
         self.assertEqual(self.reject_right_femur()["stage"], "edit")
 
         # alice corrects it in 3D Slicer.
-        handout = self.client.next_subject()
-        self.assertEqual((handout["subject_key"], handout["stage"]), ("001_000001", "edit"))
+        handout = self.client.next_scan()
+        self.assertEqual((handout["scan_key"], handout["stage"]), ("ds-0001/sub-000001/scan-01", "edit"))
         image = self.client.download_image(handout["assignment_id"], self.tmp_path / "work" / "image.nii.gz")
         segmentation = self.client.download_segmentation(
             handout["assignment_id"], self.tmp_path / "work" / "segmentation.seg.nrrd"
@@ -116,23 +116,24 @@ class ClientHappyPathTests(LiveServerTestCase):
 
         # bob reviews the correction, and the administrator approves it.
         bob = BoneHubQCClient(self.base_url, self.bob_key, timeout=30, role=REVIEWER)
-        handout = bob.next_subject()
-        self.assertEqual((handout["subject_key"], handout["segmentation_source"]), ("001_000001", "staged"))
+        handout = bob.next_scan()
+        self.assertEqual((handout["scan_key"], handout["segmentation_source"]), ("ds-0001/sub-000001/scan-01", "staged"))
         result = bob.submit(handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True)
         self.assertEqual(result["stage"], "approval")
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
-        self.store.approve("001_000001")
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "source"})
+        self.store.approve("ds-0001/sub-000001/scan-01")
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "manual"})
+        self.assertEqual(self.reviewed(self.store), {"FEMUR_LEFT", "FEMUR_RIGHT"})
 
     def test_a_rejection_needs_no_file_and_changes_nothing(self):
-        before = self.builder.all_subject_info(1)
-        handout = self.reviewer.next_subject()
+        before = self.dataset_state()
+        handout = self.reviewer.next_scan()
         result = self.reviewer.submit(handout["assignment_id"], quality_check_confirmed=False, comment="too noisy")
         self.assertEqual((result["state"], result["stage"]), ("submitted", "rejected"))
-        self.assertEqual(self.builder.all_subject_info(1), before)
+        self.assertEqual(self.dataset_state(), before)
 
     def test_named_labels_can_be_judged_one_at_a_time(self):
-        handout = self.reviewer.next_subject()
+        handout = self.reviewer.next_scan()
         result = self.reviewer.submit(
             handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True,
             confirmed_labels=["FEMUR_RIGHT"], missing_labels=["TIBIA_LEFT"],
@@ -142,27 +143,27 @@ class ClientHappyPathTests(LiveServerTestCase):
         self.assertEqual(result["stage"], "edit")
 
     def test_assignments_can_be_listed_and_re_read(self):
-        handout = self.reviewer.next_subject()
+        handout = self.reviewer.next_scan()
         self.assertEqual([a["assignment_id"] for a in self.reviewer.my_assignments()], [handout["assignment_id"]])
-        self.assertEqual(self.reviewer.assignment(handout["assignment_id"])["subject_key"], handout["subject_key"])
+        self.assertEqual(self.reviewer.assignment(handout["assignment_id"])["scan_key"], handout["scan_key"])
         self.assertEqual(self.client.my_assignments(), [], "3D Slicer lists what it was handed")
 
     def test_a_lease_can_be_extended_and_the_subject_given_back(self):
-        handout = self.reviewer.next_subject()
+        handout = self.reviewer.next_scan()
         self.reviewer.extend(handout["assignment_id"])
         self.assertEqual(self.reviewer.release(handout["assignment_id"])["state"], "released")
 
     def test_two_clients_receive_different_subjects(self):
         bob = BoneHubQCClient(self.base_url, self.bob_key, timeout=30, role=REVIEWER)
-        self.assertNotEqual(self.reviewer.next_subject()["subject_key"], bob.next_subject()["subject_key"])
+        self.assertNotEqual(self.reviewer.next_scan()["scan_key"], bob.next_scan()["scan_key"])
 
     def test_a_user_can_pick_work_back_up_after_a_crash(self):
-        first = self.reviewer.next_subject()
+        first = self.reviewer.next_scan()
         restarted = BoneHubQCClient(self.base_url, self.alice_key, timeout=30, role=REVIEWER)
-        self.assertEqual(restarted.next_subject()["assignment_id"], first["assignment_id"])
+        self.assertEqual(restarted.next_scan()["assignment_id"], first["assignment_id"])
 
     def test_a_download_leaves_no_partial_file_behind(self):
-        handout = self.reviewer.next_subject()
+        handout = self.reviewer.next_scan()
         destination = self.tmp_path / "work" / "image.nii.gz"
         self.reviewer.download_image(handout["assignment_id"], destination)
         self.assertEqual([p.name for p in destination.parent.iterdir()], ["image.nii.gz"])
@@ -177,7 +178,7 @@ class ClientErrorTests(LiveServerTestCase):
 
     def test_the_servers_message_reaches_the_caller(self):
         self.reject_right_femur()
-        handout = self.client.next_subject()
+        handout = self.client.next_scan()
         with self.assertRaises(QCClientError) as ctx:
             self.client.submit(
                 handout["assignment_id"],
@@ -189,7 +190,7 @@ class ClientErrorTests(LiveServerTestCase):
 
     def test_an_empty_queue_is_reported_as_404(self):
         with self.assertRaises(QCClientError) as ctx:
-            self.client.next_subject()  # nobody has sent an editor anything yet
+            self.client.next_scan()  # nobody has sent an editor anything yet
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_the_client_refuses_to_confirm_without_a_file(self):
@@ -219,18 +220,18 @@ class ClientErrorTests(LiveServerTestCase):
 
 
 class ClientSubjectWithoutSegmentationTests(LiveServerTestCase):
-    """A subject an editor must segment from scratch."""
+    """A scan an editor must segment from scratch."""
 
-    n_subjects = 0  # the only subject is the one added below, and it has no segmentation
+    n_scans = 0  # the only scan is the one added below, and it has no segmentation
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 9, segmentation=None)
-        self.store.config.include_subjects_without_segmentation = True
+        self.builder.add_scan(1, 9, segmentation=None)
+        self.store.config.include_scans_without_segmentation = True
         self.store.refresh_index()
 
     def test_the_handout_says_there_is_nothing_to_download(self):
-        handout = self.client.next_subject()
+        handout = self.client.next_scan()
         self.assertEqual(handout["subject_id"], 9)
         self.assertFalse(handout["has_segmentation"])
         self.assertIsNone(handout["segmentation_url"])
@@ -240,7 +241,7 @@ class ClientSubjectWithoutSegmentationTests(LiveServerTestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_a_segmentation_created_from_scratch_waits_for_review(self):
-        handout = self.client.next_subject()
+        handout = self.client.next_scan()
         result = self.client.submit(
             handout["assignment_id"],
             quality_check_confirmed=True,

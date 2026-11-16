@@ -6,11 +6,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-#: A lease is ``assigned`` until the user gives a verdict (``submitted``), gives the subject
+#: A lease is ``assigned`` until the user gives a verdict (``submitted``), gives the scan
 #: back (``released``), or runs out of time (``expired``).
 AssignmentState = Literal["assigned", "submitted", "released", "expired"]
 
-#: What a user may do, and so which client they may use. A reviewer looks at subjects on the
+#: What a user may do, and so which client they may use. A reviewer looks at scans on the
 #: browser review page and accepts or rejects each label of the segmentation as it is; an editor
 #: corrects the segmentations reviewers rejected, in 3D Slicer. A user holds one role or both.
 Role = Literal["reviewer", "editor"]
@@ -24,7 +24,7 @@ ROLES: tuple[Role, ...] = (REVIEWER, EDITOR)
 #: The roles of a new user unless others are chosen.
 DEFAULT_ROLES: tuple[Role, ...] = ROLES
 
-#: What a user is sent of each subject. A file a user is not sent is left out of the handout
+#: What a user is sent of each scan. A file a user is not sent is left out of the handout
 #: and refused at its download endpoint.
 DataAccess = Literal["image_and_segmentation", "segmentation", "image"]
 
@@ -36,10 +36,10 @@ DATA_ACCESS_DESCRIPTIONS: dict[str, str] = {
     "image": "the image only",
 }
 
-#: Where a subject stands in the quality check; see ``workflow``. The first five are open.
+#: Where a scan stands in the quality check; see ``workflow``. The first five are open.
 CaseStage = Literal["review", "edit", "approval", "escalated", "rejected", "applied", "closed"]
 
-#: What has become of one label of a subject; see ``workflow``.
+#: What has become of one label of a scan; see ``workflow``.
 LabelState = Literal["pending", "accepted", "rejected", "removed", "kept"]
 
 
@@ -64,7 +64,7 @@ class User(BaseModel):
     data_access: DataAccess = Field(
         ...,
         description=(
-            "What this user is sent of each subject: 'image_and_segmentation', 'segmentation' "
+            "What this user is sent of each scan: 'image_and_segmentation', 'segmentation' "
             "(the segmentation only) or 'image' (the image only)."
         ),
     )
@@ -103,16 +103,17 @@ class User(BaseModel):
 
 
 class Assignment(BaseModel):
-    """One subject handed to one user, in one role."""
+    """One scan handed to one user, in one role."""
 
     assignment_id: str
-    subject_key: str = Field(..., description="'<dataset_id:03d>_<subject_id:06d>'")
+    scan_key: str = Field(..., description="The scan's path in the database, e.g. 'ds-0027/sub-000001/scan-01'")
     dataset_id: int
     subject_id: int
+    scan_id: int
     user: str
-    role: Role = Field(..., description="The role the subject was handed out in")
+    role: Role = Field(..., description="The role the scan was handed out in")
     case_revision: int = Field(
-        ..., description="The revision of the subject's case when it was handed out, 0 when it had none"
+        ..., description="The revision of the scan's case when it was handed out, 0 when it had none"
     )
     state: AssignmentState = "assigned"
     assigned_at: str
@@ -120,14 +121,14 @@ class Assignment(BaseModel):
     submitted_at: str | None = None
     quality_check_confirmed: bool | None = None
     comment: str | None = None
-    # What the verdict did; the subject's case tells the whole story.
+    # What the verdict did; the scan's case tells the whole story.
     accepted_labels: list[str] | None = None
     rejected_labels: list[str] | None = None
     missing_labels: list[str] | None = None
     edited_labels: list[str] | None = None
     removed_labels: list[str] | None = None
     segmentation_staged: bool = False
-    stage_after: CaseStage | None = Field(None, description="Where the verdict sent the subject")
+    stage_after: CaseStage | None = Field(None, description="Where the verdict sent the scan")
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -141,13 +142,20 @@ class FileFingerprint(BaseModel):
 
 
 class CaseLabel(BaseModel):
-    """One label of a subject, on its way through the quality check."""
+    """One label of a scan, on its way through the quality check."""
 
     state: LabelState
     painted: bool = Field(True, description="The label is in the segmentation under quality check")
     by: str | None = Field(None, description="Who gave it this state; None for the state the case began with")
     at: str | None = None
     edited_by: str | None = Field(None, description="The editor whose correction this label now comes from")
+    drawn: bool = Field(
+        False,
+        description=(
+            "An editor drew it, or changed its voxels, so that it differs from the scan's segmentation: an "
+            "approval records it in scan.json as manual"
+        ),
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -164,15 +172,15 @@ class CaseRequest(BaseModel):
 
 
 class CaseEvent(BaseModel):
-    """One step in a subject's quality check: a verdict, or something the administrator did."""
+    """One step in a scan's quality check: a verdict, or something the administrator did."""
 
     at: str
     by: str
     role: str = Field(..., description="'reviewer', 'editor' or 'admin'")
     action: str = Field(
-        ..., description="'review', 'reject' (the subject as a whole), 'edit', 'escalate', 'approve', 'return' or 'close'"
+        ..., description="'review', 'reject' (the scan as a whole), 'edit', 'escalate', 'approve', 'return' or 'close'"
     )
-    stage: CaseStage = Field(..., description="Where the subject went")
+    stage: CaseStage = Field(..., description="Where the scan went")
     comment: str | None = None
     assignment_id: str | None = None
     details: dict = Field(default_factory=dict)
@@ -181,12 +189,13 @@ class CaseEvent(BaseModel):
 
 
 class Case(BaseModel):
-    """A subject's quality check on this server: every verdict so far, kept apart from the dataset
+    """A scan's quality check on this server: every verdict so far, kept apart from the dataset
     until the administrator approves it."""
 
-    subject_key: str
+    scan_key: str
     dataset_id: int
     subject_id: int
+    scan_id: int
     stage: CaseStage
     revision: int = Field(0, description="Counts the changes to the case")
     labels: dict[str, CaseLabel] = Field(default_factory=dict)
@@ -194,12 +203,29 @@ class Case(BaseModel):
     staged: bool = Field(False, description="An editor's segmentation waits in this server's state folder")
     edited_by: str | None = Field(None, description="The editor of the staged segmentation")
     base: FileFingerprint | None = Field(
-        None, description="The dataset's segmentation when the case began; None when it had none"
+        None, description="The scan's segmentation when the case began; None when it had none"
+    )
+    reviewed_before: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The labels a server on this database had reviewed when the case began, the segmentation being "
+            "unchanged since"
+        ),
     )
     created_at: str
     updated_at: str
     applied_at: str | None = None
     backup_path: str | None = None
+    result: FileFingerprint | None = Field(
+        None, description="The scan's segmentation as the approval left it; None until approved"
+    )
+    reviewed_labels: list[str] | None = Field(
+        None,
+        description=(
+            "The labels the approval left reviewed, for every server on the database, while the segmentation "
+            "stays as it left it; None until approved"
+        ),
+    )
     events: list[CaseEvent] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
@@ -222,16 +248,22 @@ class HandoutSegment(BaseModel):
 
 
 class HandoutLabel(BaseModel):
-    """One label of the subject, with what the quality check has made of it so far."""
+    """One label of the scan, with what the quality check has made of it so far."""
 
     name: str
     value: int | None = Field(None, description="BoneLabelMap value")
-    dataset_status: int | None = Field(None, description="The label's status in Subject_info (0, 1 or 2), if listed")
+    origin: str | None = Field(
+        None, description="The label's origin in scan.json ('source', 'manual', 'model:...', 'derived:...'), if listed"
+    )
+    reviewed: bool = Field(
+        False,
+        description="A server on this database had reviewed it when the quality check began, the segmentation unchanged since",
+    )
     state: LabelState = Field(
         ...,
         description=(
             "'pending' waits for a reviewer, 'accepted' waits for approval, 'rejected' waits for an editor, "
-            "'removed' is not in the segmentation, 'kept' is not under review and stays as the dataset has it"
+            "'removed' is not in the segmentation, 'kept' is not under review and stays as the scan has it"
         ),
     )
     painted: bool = Field(
@@ -245,42 +277,43 @@ class HandoutLabel(BaseModel):
     edited_by: str | None = None
 
 
-class SubjectHandout(BaseModel):
-    """What a client receives when it asks for the next subject.
+class ScanHandout(BaseModel):
+    """What a client receives when it asks for the next scan.
 
     ``has_image`` and ``has_segmentation`` say whether there is a file for this user to
     download: the server has it and the user's ``data_access`` includes it. The segmentation
     is the one under review: an editor's correction waiting in the server's state folder, or
-    else the dataset's own.
+    else the scan's own.
     """
 
     assignment_id: str
+    scan_key: str = Field(..., description="The scan's path in the database, e.g. 'ds-0027/sub-000001/scan-01'")
     dataset_id: int
     subject_id: int
-    subject_key: str
+    scan_id: int
     expires_at: str
-    role: Role = Field(..., description="The role the subject was handed out in")
+    role: Role = Field(..., description="The role the scan was handed out in")
     stage: CaseStage = Field(..., description="What is asked: 'review' the labels, or 'edit' the segmentation")
-    data_access: DataAccess = Field(..., description="What this user is sent of each subject")
+    data_access: DataAccess = Field(..., description="What this user is sent of each scan")
     has_image: bool
     has_segmentation: bool
     segmentation_source: Literal["dataset", "staged"] | None = Field(
         None,
         description=(
             "'staged' when the segmentation is an editor's correction, not in the dataset yet; 'dataset' when "
-            "it is the dataset's own; None when there is none"
+            "it is the scan's own; None when there is none"
         ),
     )
-    segmentation_labels: dict[str, int] = Field(
-        default_factory=dict, description="Label name -> current label status in Subject_info (0, 1 or 2)"
+    segmentation_labels: dict[str, str] = Field(
+        default_factory=dict, description="Label name -> its origin in scan.json, for the scan's own segmentation"
     )
     labels: list[HandoutLabel] = Field(
-        default_factory=list, description="Every label of the subject, with its state in the quality check"
+        default_factory=list, description="Every label of the scan, with its state in the quality check"
     )
     requests: list[CaseRequest] = Field(
         default_factory=list, description="Open requests for an editor that are about no single label"
     )
-    history: list[CaseEvent] = Field(default_factory=list, description="The subject's quality check so far")
+    history: list[CaseEvent] = Field(default_factory=list, description="The scan's quality check so far")
     segments: list[HandoutSegment] = Field(
         default_factory=list,
         description="The segments of the segmentation, read from its header; empty unless has_segmentation",
@@ -292,8 +325,9 @@ class SubjectHandout(BaseModel):
             "it is not on its image's voxel grid; None when it can. Only given with has_segmentation."
         ),
     )
-    subject_info: dict = Field(default_factory=dict, description="The subject's entry from Subject_info_XXX.json")
-    dataset_info: dict = Field(default_factory=dict, description="The dataset's Dataset_info_XXX.json")
+    scan_info: dict = Field(default_factory=dict, description="The scan's scan.json")
+    subject_info: dict = Field(default_factory=dict, description="The subject's subject.json: the person scanned")
+    dataset_info: dict = Field(default_factory=dict, description="The dataset's dataset.json")
     image_url: str | None = None
     segmentation_url: str | None = None
 
@@ -303,13 +337,13 @@ class SubmissionRequest(BaseModel):
 
     A reviewer judges the segmentation as it is (``use_stored_segmentation``): each label is
     accepted or rejected, and bones it lacks are reported missing. An editor uploads the
-    corrected segmentation. ``quality_check_confirmed=false`` rejects the subject as a whole,
+    corrected segmentation. ``quality_check_confirmed=false`` rejects the scan as a whole,
     and sends it to the administrator: from a reviewer, as no correction of its segmentation
     would help, so no editor sees it; from an editor, as it could not be corrected.
     """
 
     quality_check_confirmed: bool = Field(
-        ..., description="True gives the verdicts below, or the corrected segmentation; false rejects the subject"
+        ..., description="True gives the verdicts below, or the corrected segmentation; false rejects the scan"
     )
     confirmed_labels: list[str] | None = Field(
         None,
@@ -337,20 +371,20 @@ class SubmissionRequest(BaseModel):
             "gives a verdict, on the browser review page. Uploading a segmentation takes an editor."
         ),
     )
-    comment: str | None = Field(None, description="Free-form comment, kept with the subject and in the audit log")
+    comment: str | None = Field(None, description="Free-form comment, kept with the scan and in the audit log")
 
     model_config = ConfigDict(extra="forbid")
 
 
 class SubmissionResult(BaseModel):
     """What the server did with a submission. Nothing reaches the dataset before the
-    administrator approves the subject."""
+    administrator approves the scan."""
 
     assignment_id: str
-    subject_key: str
+    scan_key: str
     quality_check_confirmed: bool
     state: AssignmentState
-    stage: CaseStage = Field(..., description="Where the subject went: review, edit, approval or escalated")
+    stage: CaseStage = Field(..., description="Where the scan went: review, edit, approval, escalated or rejected")
     segmentation_staged: bool = Field(False, description="The uploaded segmentation waits in the server's state folder")
     accepted_labels: list[str] = Field(default_factory=list)
     rejected_labels: list[str] = Field(default_factory=list)
@@ -362,19 +396,19 @@ class SubmissionResult(BaseModel):
 
 
 class QueueStats(BaseModel):
-    """Snapshot of the queue, for the admin panel. Each eligible subject counts once."""
+    """Snapshot of the queue, for the admin panel. Each eligible scan counts once."""
 
-    total_subjects: int
-    eligible_subjects: int
+    total_scans: int
+    eligible_scans: int
     available: int = Field(..., description="Not looked at yet, and free: waiting for its first review")
     assigned: int = Field(..., description="Handed out on this server right now")
-    assigned_by_other_servers: int = Field(0, description="Eligible subjects out, or in progress, on another server")
+    assigned_by_other_servers: int = Field(0, description="Eligible scans out, or in progress, on another server")
     to_review: int = Field(0, description="In progress, waiting for a reviewer")
     to_edit: int = Field(0, description="In progress, waiting for an editor")
     awaiting_approval: int = Field(0, description="Every label accepted, waiting for the administrator")
     escalated: int = Field(0, description="An editor sent it to the administrator")
-    rejected_subjects: int = Field(0, description="A reviewer rejected it as a whole, for the administrator to record")
+    rejected_scans: int = Field(0, description="A reviewer rejected it as a whole, for the administrator to record")
     applied: int = Field(0, description="Approved and written into the dataset")
     closed: int = Field(0, description="Closed by the administrator without writing anything")
-    datasets: dict[int, int] = Field(default_factory=dict, description="dataset id -> eligible subject count")
+    datasets: dict[int, int] = Field(default_factory=dict, description="dataset id -> eligible scan count")
     index_built_at: str | None = None

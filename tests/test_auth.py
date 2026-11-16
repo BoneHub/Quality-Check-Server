@@ -178,7 +178,7 @@ class UserAccountTests(QCTestCase):
     def test_deleting_a_user_revokes_the_key_and_frees_their_subject(self):
         _, api_key = self.store.create_user("alice")
         user = self.store.authenticate(api_key)
-        assignment = self.store.next_subject(user, REVIEWER)
+        assignment = self.store.next_scan(user, REVIEWER)
 
         self.store.delete_user("alice")
         with self.assertRaises(QCError):

@@ -2,8 +2,8 @@
 
 The page cannot edit, so it sends ``use_stored_segmentation`` instead of a file. Accepting a
 label vouches for the segmentation as it is, so the file is held to the same rules as an
-upload; it is left exactly as it is, and the accepted labels become reviewed (status 2) once
-the administrator approves the subject. Nobody accepts or replaces a segmentation their
+upload; it is left exactly as it is, and the accepted labels become reviewed once the
+administrator approves the scan. Nobody accepts or replaces a segmentation their
 account is not sent.
 """
 
@@ -12,14 +12,14 @@ from __future__ import annotations
 import json
 import unittest
 
-from bonehub_data_schema import write_segmentation
+from bonehub_format import write_segmentation
 from qc_server.models import EDITOR, REVIEWER
 from qc_server.store import QCError
 
-from tests.support import QCTestCase, reference_image, segmentation_array, write_mask
+from tests.support import QCTestCase, reference_image, segmentation_array
 from tests.test_api import ApiTestCase
 
-KEY = "001_000001"
+KEY = "ds-0001/sub-000001/scan-01"
 
 
 def write_shifted_mask(path, labels, shift_mm: float) -> None:
@@ -32,10 +32,10 @@ def write_shifted_mask(path, labels, shift_mm: float) -> None:
 class ConfirmStoredSegmentationTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
-        self.assignment = self.store.next_subject(self.alice, REVIEWER)
+        self.assignment = self.store.next_scan(self.alice, REVIEWER)
         self.before_bytes = self.builder.segmentation_file(1, 1).read_bytes()
 
     def confirm(self, **kwargs):
@@ -46,10 +46,13 @@ class ConfirmStoredSegmentationTests(QCTestCase):
     def test_the_labels_become_reviewed_on_approval_and_the_file_stays_as_it_is(self):
         outcome = self.confirm()
         self.assertEqual(outcome.accepted_labels, ["FEMUR_LEFT", "FEMUR_RIGHT"])
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        scan_json = (self.builder.scan_folder(1, 1) / "scan.json").read_bytes()
         self.store.approve(KEY)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.reviewed(self.store), {"FEMUR_LEFT", "FEMUR_RIGHT"})
         self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.before_bytes)
+        self.assertEqual(
+            (self.builder.scan_folder(1, 1) / "scan.json").read_bytes(), scan_json, "nothing in it changes"
+        )
 
     def test_a_label_left_unaccepted_waits_for_another_reviewer(self):
         outcome = self.confirm(confirmed_labels=["FEMUR_RIGHT"])
@@ -90,33 +93,73 @@ class ConfirmStoredSegmentationTests(QCTestCase):
 
 
 class ListedButNotPaintedTests(QCTestCase):
-    def test_a_listed_label_the_file_does_not_paint_becomes_not_available(self):
-        """The same rule as for an upload: the file is the truth about the subject."""
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1}, write_segmentation_file=False)
-        write_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT"])
+    def test_a_listed_label_the_file_does_not_paint_is_taken_out_of_scan_json(self):
+        """The same rule as for an upload: the file is the truth about the scan, and scan.json
+        lists exactly its labels."""
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], painted=["FEMUR_LEFT"])
         store = self.make_store()
         alice = store.create_user("alice")[0]
-        assignment = store.next_subject(alice, REVIEWER)
+        assignment = store.next_scan(alice, REVIEWER)
 
         outcome = store.submit(assignment.assignment_id, alice, True, None, use_stored_segmentation=True)
         self.assertEqual(outcome.stage, "approval")
         self.assertEqual(store.case_of(KEY).labels["FEMUR_RIGHT"].state, "removed")
-        store.approve(KEY)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 0})
+        outcome = store.approve(KEY)
+        self.assertEqual(outcome.updated_labels, {"FEMUR_RIGHT": None})
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source"})
+        self.assertEqual(self.reviewed(store), {"FEMUR_LEFT"})
+
+
+class PaintedButNotListedTests(QCTestCase):
+    """A label the segmentation paints but scan.json does not list has no origin anybody knows."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"], painted=["FEMUR_LEFT", "FEMUR_RIGHT"])
+        self.store = self.make_store()
+        self.alice = self.store.create_user("alice")[0]
+
+    def test_it_is_reviewed_like_any_other(self):
+        assignment = self.store.next_scan(self.alice, REVIEWER)
+        self.assertEqual(self.store.handout_case(assignment).labels["FEMUR_RIGHT"].state, "pending")
+
+    def test_approving_it_untouched_is_refused_until_scan_json_says_where_it_comes_from(self):
+        self.review(self.store, self.alice)
+        before = self.dataset_state()
+        with self.assertRaises(QCError) as ctx:
+            self.store.approve(KEY)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("FEMUR_RIGHT", ctx.exception.message)
+        self.assertIn("scan.json", ctx.exception.message)
+        self.assertEqual(self.dataset_state(), before, "nothing is half written")
+
+        info = self.builder.scan_info(1, 1)
+        info["segmentation"]["FEMUR_RIGHT"] = "source"
+        (self.builder.scan_folder(1, 1) / "scan.json").write_text(json.dumps(info), encoding="utf-8")
+        self.store.approve(KEY)
+        self.assertEqual(self.reviewed(self.store), {"FEMUR_LEFT", "FEMUR_RIGHT"})
+
+    def test_redrawn_by_an_editor_it_is_manual(self):
+        self.review(self.store, self.alice, rejected=["FEMUR_RIGHT"])
+        bob = self.store.create_user("bob")[0]
+        self.edit(self.store, bob, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        self.review(self.store, self.alice)
+        self.store.approve(KEY)
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "manual"})
 
 
 class ConfirmStoredRefusalTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
 
     def open(self, **config):
         store = self.make_store(**config)
         alice = store.create_user("alice")[0]
-        return store, alice, store.next_subject(alice, REVIEWER)
+        return store, alice, store.next_scan(alice, REVIEWER)
 
     def assert_untouched(self, store, before: bytes | None = None) -> None:
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1})
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source"})
         if before is not None:
             self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), before)
         self.assertIsNone(store.case_of(KEY), "nothing was recorded")
@@ -162,31 +205,31 @@ class ConfirmStoredRefusalTests(QCTestCase):
         store, alice, assignment = self.open(require_geometry_match=False)
         store.submit(assignment.assignment_id, alice, True, None, use_stored_segmentation=True)
         store.approve(KEY)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2})
+        self.assertEqual(self.reviewed(store), {"FEMUR_LEFT"})
 
     def test_the_issue_is_known_before_anyone_submits(self):
         store, _, _ = self.open()
-        self.assertIsNone(store.stored_segmentation_issue(1, 1))
+        self.assertIsNone(store.stored_segmentation_issue(KEY))
         write_shifted_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT"], 0.4)
-        self.assertIn("affine", store.stored_segmentation_issue(1, 1))
+        self.assertIn("affine", store.stored_segmentation_issue(KEY))
 
     def test_a_rejection_ignores_the_flag(self):
         store, alice, assignment = self.open()
         outcome = store.submit(assignment.assignment_id, alice, False, None, use_stored_segmentation=True)
         self.assertEqual((outcome.assignment.state, outcome.stage), ("submitted", "rejected"))
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1})
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source"})
 
 
 class NoStoredSegmentationTests(QCTestCase):
     def test_there_is_nothing_to_confirm_as_it_is(self):
-        self.builder.add_subject(1, 1, segmentation=None)
-        store = self.make_store(include_subjects_without_segmentation=True)
+        self.builder.add_scan(1, 1, segmentation=None)
+        store = self.make_store(include_scans_without_segmentation=True)
         alice = store.create_user("alice")[0]
-        assignment = store.next_subject(alice, EDITOR)
+        assignment = store.next_scan(alice, EDITOR)
         with self.assertRaises(QCError) as ctx:
             store.submit(assignment.assignment_id, alice, True, None, use_stored_segmentation=True)
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertEqual(store.stored_segmentation_issue(1, 1), "There is no stored segmentation.")
+        self.assertEqual(store.stored_segmentation_issue(KEY), "There is no stored segmentation.")
 
 
 class DataAccessVerdictTests(QCTestCase):
@@ -194,13 +237,13 @@ class DataAccessVerdictTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.before_bytes = self.builder.segmentation_file(1, 1).read_bytes()
 
     def open(self, access: str, **config):
         store = self.make_store(**config)
         user = store.create_user(f"user_{access}", data_access=access)[0]
-        return store, user, store.next_subject(user, REVIEWER)
+        return store, user, store.next_scan(user, REVIEWER)
 
     def test_a_reviewer_sent_the_image_only_cannot_accept_the_stored_segmentation(self):
         store, ian, assignment = self.open("image")
@@ -219,20 +262,21 @@ class DataAccessVerdictTests(QCTestCase):
         store = self.make_store()
         alice = store.create_user("alice")[0]
         self.review(store, alice, rejected=["FEMUR_RIGHT"])
-        assignment = store.next_subject(alice, EDITOR)
+        assignment = store.next_scan(alice, EDITOR)
         alice = store.update_user("alice", data_access="image")
         with self.assertRaises(QCError) as ctx:
             store.submit(assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT"]))
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("not seen", ctx.exception.message)
-        self.assertFalse((self.state_dir / "staged" / "Dataset_001" / f"{KEY}.seg.nrrd").exists())
+        self.assertFalse((self.state_dir / "staged" / KEY / "segmentation.seg.nrrd").exists())
+        self.assertEqual(list((self.state_dir / "staged").rglob("*.seg.nrrd")), [])
 
     def test_an_editor_sent_the_image_only_can_create_a_segmentation_where_there_is_none(self):
-        self.builder.add_subject(1, 2, segmentation=None)
-        store = self.make_store(include_subjects_without_segmentation=True)
+        self.builder.add_scan(1, 2, segmentation=None)
+        store = self.make_store(include_scans_without_segmentation=True)
         ian = store.create_user("ian", data_access="image")[0]
-        assignment = store.next_subject(ian, EDITOR)
-        self.assertEqual(assignment.subject_id, 2, "the subject with a segmentation is not for them")
+        assignment = store.next_scan(ian, EDITOR)
+        self.assertEqual(assignment.subject_id, 2, "the scan with a segmentation is not for them")
         outcome = store.submit(assignment.assignment_id, ian, True, self.upload_file(["TIBIA_LEFT"]))
         self.assertTrue(outcome.segmentation_staged)
         self.assertEqual(outcome.pending_labels, ["TIBIA_LEFT"])
@@ -256,7 +300,7 @@ class ConfirmOverHttpTests(ApiTestCase):
         )
 
     def test_the_review_page_gives_its_verdict_without_a_file(self):
-        handout = self.next_subject(self.alice_key, REVIEWER)
+        handout = self.next_scan(self.alice_key, REVIEWER)
         self.assertIsNone(handout["stored_segmentation_issue"])
         response = self.submit_stored(
             self.alice_key, handout["assignment_id"], confirmed_labels=["FEMUR_LEFT"],
@@ -269,7 +313,7 @@ class ConfirmOverHttpTests(ApiTestCase):
 
     def test_the_handout_warns_about_a_segmentation_off_its_grid(self):
         write_shifted_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT", "FEMUR_RIGHT"], 0.4)
-        handout = self.next_subject(self.alice_key, REVIEWER)
+        handout = self.next_scan(self.alice_key, REVIEWER)
         self.assertIn("0.4 mm", handout["stored_segmentation_issue"])
         response = self.submit_stored(self.alice_key, handout["assignment_id"])
         self.assertEqual(response.status_code, 409)

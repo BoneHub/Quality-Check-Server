@@ -1,7 +1,7 @@
-"""How the server decides which subject to give to which client.
+"""How the server decides which scan to give to which client.
 
-Requirement under test: "the users will ask for next subject, then server decides which
-subject to give to which client". Two reviewers must never be handed the same subject.
+Requirement under test: "the users will ask for next scan, then server decides which
+scan to give to which client". Two reviewers must never be handed the same scan.
 """
 
 from __future__ import annotations
@@ -18,56 +18,56 @@ from tests.support import QCTestCase
 class NextSubjectTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=3)
+        self.default_dataset(n_scans=3)
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
         self.bob = self.store.create_user("bob")[0]
 
     def test_sequential_strategy_hands_out_the_lowest_free_subject(self):
-        self.assertEqual(self.store.next_subject(self.alice, REVIEWER).subject_key, "001_000001")
-        self.assertEqual(self.store.next_subject(self.bob, REVIEWER).subject_key, "001_000002")
+        self.assertEqual(self.store.next_scan(self.alice, REVIEWER).scan_key, "ds-0001/sub-000001/scan-01")
+        self.assertEqual(self.store.next_scan(self.bob, REVIEWER).scan_key, "ds-0001/sub-000002/scan-01")
 
     def test_reviewers_never_hold_the_same_subject(self):
         carol = self.store.create_user("carol")[0]
-        handed_out = [self.store.next_subject(user, REVIEWER).subject_key for user in (self.alice, self.bob, carol)]
+        handed_out = [self.store.next_scan(user, REVIEWER).scan_key for user in (self.alice, self.bob, carol)]
         self.assertEqual(len(set(handed_out)), 3)
 
     def test_the_queue_runs_out_with_a_clear_404(self):
         for user in (self.alice, self.bob, self.store.create_user("carol")[0]):
-            self.store.next_subject(user, REVIEWER)
+            self.store.next_scan(user, REVIEWER)
         with self.assertRaises(QCError) as ctx:
-            self.store.next_subject(self.store.create_user("dave")[0], REVIEWER)
+            self.store.next_scan(self.store.create_user("dave")[0], REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_asking_again_returns_the_subject_already_held(self):
-        """A client that lost its local copy can simply ask for the next subject again."""
-        first = self.store.next_subject(self.alice, REVIEWER)
-        second = self.store.next_subject(self.alice, REVIEWER)
+        """A client that lost its local copy can simply ask for the next scan again."""
+        first = self.store.next_scan(self.alice, REVIEWER)
+        second = self.store.next_scan(self.alice, REVIEWER)
         self.assertEqual(first.assignment_id, second.assignment_id)
 
     def test_a_user_holds_one_subject_at_a_time(self):
-        first = self.store.next_subject(self.alice, REVIEWER)
-        self.store.next_subject(self.alice, REVIEWER)
+        first = self.store.next_scan(self.alice, REVIEWER)
+        self.store.next_scan(self.alice, REVIEWER)
         self.assertEqual([a.assignment_id for a in self.store.open_assignments_of("alice")], [first.assignment_id])
-        # Once it is handed back, the next request leases another subject.
+        # Once it is handed back, the next request leases another scan.
         self.store.release_assignment(first.assignment_id, self.alice)
-        self.assertNotEqual(self.store.next_subject(self.alice, REVIEWER).assignment_id, first.assignment_id)
+        self.assertNotEqual(self.store.next_scan(self.alice, REVIEWER).assignment_id, first.assignment_id)
 
     def test_the_random_strategy_still_hands_out_a_real_free_subject(self):
         store = self.make_store(assignment_strategy="random")
         users = [store._users["alice"], store._users["bob"], store.create_user("carol")[0]]
-        keys = {store.next_subject(user, REVIEWER).subject_key for user in users}
-        self.assertEqual(keys, {"001_000001", "001_000002", "001_000003"})
+        keys = {store.next_scan(user, REVIEWER).scan_key for user in users}
+        self.assertEqual(keys, {"ds-0001/sub-000001/scan-01", "ds-0001/sub-000002/scan-01", "ds-0001/sub-000003/scan-01"})
 
     def test_an_assignment_carries_the_reviewer_and_an_expiry(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self.assertEqual(assignment.user, "alice")
         self.assertEqual(assignment.state, "assigned")
         self.assertEqual((assignment.dataset_id, assignment.subject_id), (1, 1))
         self.assertGreater(assignment.expires_at, assignment.assigned_at)
 
     def test_assignments_survive_a_restart(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         reopened = self.make_store()
         held = reopened.open_assignments_of("alice")
         self.assertEqual([a.assignment_id for a in held], [assignment.assignment_id])
@@ -76,7 +76,7 @@ class NextSubjectTests(QCTestCase):
 class LeaseTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=2)
+        self.default_dataset(n_scans=2)
         self.store = self.make_store(lease_ttl_seconds=60)
         self.alice = self.store.create_user("alice")[0]
         self.bob = self.store.create_user("bob")[0]
@@ -86,46 +86,46 @@ class LeaseTests(QCTestCase):
         assignment.expires_at = past.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def test_an_expired_lease_returns_the_subject_to_the_queue(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self._expire(assignment)
-        self.assertEqual(self.store.next_subject(self.bob, REVIEWER).subject_key, assignment.subject_key)
+        self.assertEqual(self.store.next_scan(self.bob, REVIEWER).scan_key, assignment.scan_key)
         self.assertEqual(self.store.get_assignment(assignment.assignment_id).state, "expired")
 
     def test_extending_a_lease_pushes_the_expiry_out(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self._expire(assignment)
         extended = self.store.extend_assignment(assignment.assignment_id, self.alice)
         self.assertGreater(extended.expires_at, assignment.assigned_at)
-        # Still held by alice, so bob gets a different subject.
-        self.assertNotEqual(self.store.next_subject(self.bob, REVIEWER).subject_key, assignment.subject_key)
+        # Still held by alice, so bob gets a different scan.
+        self.assertNotEqual(self.store.next_scan(self.bob, REVIEWER).scan_key, assignment.scan_key)
 
     def test_releasing_puts_a_subject_back_for_someone_else(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         released = self.store.release_assignment(assignment.assignment_id, self.alice)
         self.assertEqual(released.state, "released")
-        self.assertEqual(self.store.next_subject(self.bob, REVIEWER).subject_key, assignment.subject_key)
+        self.assertEqual(self.store.next_scan(self.bob, REVIEWER).scan_key, assignment.scan_key)
 
     def test_a_released_subject_goes_to_the_back_of_the_same_reviewers_queue(self):
-        """Release skips a subject: the reviewer is handed the next one, not the same again."""
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        """Release skips a scan: the reviewer is handed the next one, not the same again."""
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self.store.release_assignment(assignment.assignment_id, self.alice)
-        self.assertNotEqual(self.store.next_subject(self.alice, REVIEWER).subject_key, assignment.subject_key)
+        self.assertNotEqual(self.store.next_scan(self.alice, REVIEWER).scan_key, assignment.scan_key)
 
     def test_a_released_subject_comes_back_once_nothing_else_is_waiting(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
-        self.store.next_subject(self.bob, REVIEWER)  # the only other subject is out
+        assignment = self.store.next_scan(self.alice, REVIEWER)
+        self.store.next_scan(self.bob, REVIEWER)  # the only other scan is out
         self.store.release_assignment(assignment.assignment_id, self.alice)
-        self.assertEqual(self.store.next_subject(self.alice, REVIEWER).subject_key, assignment.subject_key)
+        self.assertEqual(self.store.next_scan(self.alice, REVIEWER).scan_key, assignment.scan_key)
 
     def test_releasing_twice_is_refused(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self.store.release_assignment(assignment.assignment_id, self.alice)
         with self.assertRaises(QCError) as ctx:
             self.store.release_assignment(assignment.assignment_id, self.alice)
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_a_reviewer_cannot_touch_another_reviewers_assignment(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         for call in (
             lambda: self.store.get_assignment(assignment.assignment_id, self.bob),
             lambda: self.store.release_assignment(assignment.assignment_id, self.bob),
@@ -142,16 +142,16 @@ class LeaseTests(QCTestCase):
 
     def test_an_administrator_can_take_a_subject_back(self):
         """The admin panel releases without passing a user, so no ownership check applies."""
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self.assertEqual(self.store.release_assignment(assignment.assignment_id).state, "released")
 
 
 class AfterAVerdictTests(QCTestCase):
-    """Where a subject goes once judged: never back to the queue it came from."""
+    """Where a scan goes once judged: never back to the queue it came from."""
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
         self.bob = self.store.create_user("bob")[0]
@@ -159,27 +159,27 @@ class AfterAVerdictTests(QCTestCase):
     def test_a_rejected_label_sends_the_subject_to_the_editors_not_to_another_reviewer(self):
         outcome = self.review(self.store, self.alice, rejected=["FEMUR_LEFT"])
         with self.assertRaises(QCError):
-            self.store.next_subject(self.bob, REVIEWER)
-        self.assertEqual(self.store.next_subject(self.bob, EDITOR).subject_key, outcome.assignment.subject_key)
+            self.store.next_scan(self.bob, REVIEWER)
+        self.assertEqual(self.store.next_scan(self.bob, EDITOR).scan_key, outcome.assignment.scan_key)
 
     def test_a_rejected_subject_is_handed_to_nobody(self):
         """It waits for the administrator: no correction would help."""
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self.store.submit(assignment.assignment_id, self.alice, False, None, comment="hip implant")
         for role in (REVIEWER, EDITOR):
             with self.assertRaises(QCError):
-                self.store.next_subject(self.bob, role)
+                self.store.next_scan(self.bob, role)
 
     def test_a_subject_waiting_for_approval_is_handed_to_nobody(self):
         self.review(self.store, self.alice)
         for role in (REVIEWER, EDITOR):
             with self.assertRaises(QCError):
-                self.store.next_subject(self.bob, role)
+                self.store.next_scan(self.bob, role)
 
 
 class StatsTests(QCTestCase):
     def test_the_queue_snapshot_tracks_every_stage(self):
-        self.default_dataset(n_subjects=4)
+        self.default_dataset(n_scans=4)
         store = self.make_store()
         alice = store.create_user("alice")[0]
         bob = store.create_user("bob")[0]
@@ -187,24 +187,24 @@ class StatsTests(QCTestCase):
         self.assertEqual(store.stats().available, 4)
         self.assertEqual(store.stats().assigned, 0)
 
-        self.review(store, alice)  # subject 1 waits for approval
-        self.review(store, bob, rejected=["FEMUR_LEFT"])  # subject 2 for an editor
-        store.next_subject(alice, REVIEWER)  # subject 3 is out
+        self.review(store, alice)  # scan 1 waits for approval
+        self.review(store, bob, rejected=["FEMUR_LEFT"])  # scan 2 for an editor
+        store.next_scan(alice, REVIEWER)  # scan 3 is out
 
         stats = store.stats()
-        self.assertEqual(stats.total_subjects, 4)
+        self.assertEqual(stats.total_scans, 4)
         self.assertEqual(
             (stats.available, stats.assigned, stats.to_edit, stats.awaiting_approval), (1, 1, 1, 1)
         )
-        self.assertEqual(stats.datasets, {1: stats.eligible_subjects})
+        self.assertEqual(stats.datasets, {1: stats.eligible_scans})
 
     def test_listing_assignments_can_be_filtered_and_capped(self):
-        self.default_dataset(n_subjects=3)
+        self.default_dataset(n_scans=3)
         store = self.make_store()
         alice = store.create_user("alice")[0]
-        first = store.next_subject(alice, REVIEWER)
+        first = store.next_scan(alice, REVIEWER)
         store.release_assignment(first.assignment_id, alice)
-        store.next_subject(alice, REVIEWER)
+        store.next_scan(alice, REVIEWER)
 
         self.assertEqual(len(store.all_assignments()), 2)
         self.assertEqual(len(store.all_assignments(states=["released"])), 1)

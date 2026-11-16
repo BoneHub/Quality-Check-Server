@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from bonehub_data_schema import __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION
 
 from . import __version__, admin, api, auth, review
 from .config import STUDY_MODE, QCServerConfig, resolve_credentials_dir, resolve_dataset_root, resolve_mode, resolve_state_root
@@ -41,12 +41,12 @@ def create_app(
     credentials_dir = Path(credentials_dir) if credentials_dir else resolve_credentials_dir()
 
     app = FastAPI(
-        title="BoneHub Dataset Quality Check",
+        title="BoneHub Quality Check",
         version=__version__,
         description=(
-            "Distributes BoneHub subjects to reviewers, who judge each label on the browser review page, and "
-            "to editors, who correct the rejected ones in 3D Slicer. Verdicts wait on the server until the "
-            "administrator approves a subject, which writes it into the dataset folder."
+            "Distributes the scans of a BoneHub-format database to reviewers, who judge each label on the browser "
+            "review page, and to editors, who correct the rejected ones in 3D Slicer. Verdicts wait on the server "
+            "until the administrator approves a scan, which writes it into the database."
         ),
     )
     app.state.store = QCStore(
@@ -99,16 +99,17 @@ def _announce(store: QCStore) -> None:
         f"dataset root : {store.dataset_root}",
         f"state folder : {store.state_dir}",
         f"credentials  : {store.credentials_dir} (inside the container)",
-        f"eligible     : {stats.eligible_subjects} of {stats.total_subjects} subjects "
-        f"(label statuses {store.config.eligible_label_values})",
+        f"eligible     : {stats.eligible_scans} of {stats.total_scans} scans "
+        f"(labels {' or '.join(store.config.eligible_review_states)}, "
+        f"origins {', '.join(store.config.eligible_origins) if store.config.eligible_origins else 'any'})",
         f"in progress  : {stats.to_review} to review, {stats.to_edit} to edit, "
         f"{stats.awaiting_approval} awaiting approval, {stats.escalated} escalated",
         f"users        : {len(users)} (reviewers {sum(REVIEWER in u['roles'] for u in users)}, "
         f"editors {sum(EDITOR in u['roles'] for u in users)})",
-        f"data schema  : {SCHEMA_VERSION}",
+        f"data format  : BoneHub {SCHEMA_VERSION}",
     ]
     lines = [
-        "BoneHub Dataset Quality Check server",
+        "BoneHub Quality Check server",
         *(f"  {line}" for line in details),
         "  admin panel  : /admin",
         "  review page  : /review",

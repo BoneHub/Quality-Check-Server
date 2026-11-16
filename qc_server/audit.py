@@ -1,12 +1,14 @@
-"""Logging of everything the clients do, written into the dataset folder itself.
+"""Logging of everything the clients do, written into the database folder itself.
 
 Three destinations, on purpose:
 
 * ``<state_dir>/submissions.jsonl`` - append-only machine-readable record of every
   submission, which is what the admin panel reads back.
 * ``<state_dir>/server.log`` - server lifecycle and administrative events.
-* ``<dataset_root>/Dataset_XXX/Dataset_XXX_qualitycheck.log`` - a human-readable log
-  next to the dataset it describes, in the same format the converter already writes.
+* ``<database>/logs/ds-NNNN_qualitycheck.log`` - a human-readable log of what was written
+  into each dataset, in the database's ``logs/`` folder, where the converter writes its logs
+  in the same format. The BoneHub format keeps ``logs/`` out of what is published, and a
+  dataset folder may hold nothing but its subjects.
 """
 
 from __future__ import annotations
@@ -17,11 +19,16 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL
+from bonehub_format import layout
 
 SUBMISSION_LOG_NAME = "submissions.jsonl"
 SERVER_LOG_NAME = "server.log"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+
+def qualitycheck_log_name(dataset_id: int) -> str:
+    """The name of a dataset's quality-check log in the database's ``logs/`` folder."""
+    return f"{layout.dataset_dir_name(dataset_id)}_qualitycheck.log"
 
 
 def utc_now_iso() -> str:
@@ -95,15 +102,15 @@ class AuditLog:
         if dataset_id in self._dataset_loggers:
             return self._dataset_loggers[dataset_id]
 
-        padded = str(dataset_id).zfill(DATASET_ZFILL)
-        dataset_path = self.dataset_root / f"Dataset_{padded}"
-        dataset_path.mkdir(parents=True, exist_ok=True)
+        name = layout.dataset_dir_name(dataset_id)
+        log_dir = self.dataset_root / layout.LOGS_DIR
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-        logger = logging.getLogger(f"{self.logger.name}.dataset.{padded}")
+        logger = logging.getLogger(f"{self.logger.name}.dataset.{name}")
         logger.propagate = False
         logger.setLevel(logging.INFO)
         if not logger.handlers:
-            handler = logging.FileHandler(dataset_path / f"Dataset_{padded}_qualitycheck.log", encoding="utf-8")
+            handler = logging.FileHandler(log_dir / qualitycheck_log_name(dataset_id), encoding="utf-8")
             handler.setFormatter(logging.Formatter(LOG_FORMAT))
             logger.addHandler(handler)
         self._dataset_loggers[dataset_id] = logger

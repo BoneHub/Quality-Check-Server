@@ -1,9 +1,9 @@
 """Agreement on nominal verdicts: % agreement, Krippendorff's alpha and Gwet's AC1, each with a
-95% confidence interval from resampling whole subjects.
+95% confidence interval from resampling whole scans.
 
-The data are *units* -- in a study, one bone of one subject -- each with the values coders
+The data are *units* -- in a study, one bone of one scan -- each with the values coders
 gave it: one rater's readings of it (intra-rater), or several raters' first readings
-(inter-rater). A unit may lack values, from a rater who has not read the subject yet. Only a
+(inter-rater). A unit may lack values, from a rater who has not read the scan yet. Only a
 unit with two values or more shows agreement or disagreement; a unit with one value still
 counts towards how common each category is, in AC1.
 
@@ -17,9 +17,9 @@ counts towards how common each category is, in AC1.
   pi_k the share of category k, averaged over the units with a value (Gwet 2008, 2014). Stays
   meaningful when one category is rare, where kappa-like coefficients such as alpha collapse.
 
-Each coefficient is a function of a few sums over the units (:func:`unit_sums`). A subject's
-units add up to the subject's sums, a bootstrap resample of subjects adds up the sums of the
-subjects drawn, and the point estimate and the interval come from the same formulas.
+Each coefficient is a function of a few sums over the units (:func:`unit_sums`). A scan's
+units add up to the scan's sums, a bootstrap resample of scans adds up the sums of the
+scans drawn, and the point estimate and the interval come from the same formulas.
 
 References:
     Krippendorff, K. (2011). Computing Krippendorff's Alpha-Reliability. Annenberg School for
@@ -56,7 +56,7 @@ class Estimate:
 class Agreement:
     """How far a set of coders agree on a set of units."""
 
-    subjects: int  # subjects with a unit that shows agreement or disagreement
+    scans: int  # scans with a unit that shows agreement or disagreement
     items: int  # such units: two values or more
     values: int  # the values of those units
     shares: tuple[float, ...] | None  # of each category among those values
@@ -183,35 +183,35 @@ def gwet_ac1(units, categories) -> float | None:
 
 # ------------------------------------------------------------------ with intervals
 def agreement(
-    counts: np.ndarray, subject_of_unit: np.ndarray, samples: int, rng: np.random.Generator
+    counts: np.ndarray, scan_of_unit: np.ndarray, samples: int, rng: np.random.Generator
 ) -> Agreement:
-    """The coefficients of units, with 95% percentile bootstrap intervals over subjects.
+    """The coefficients of units, with 95% percentile bootstrap intervals over scans.
 
-    ``counts`` has a row per unit as for :func:`unit_sums`; ``subject_of_unit`` says which
-    subject each unit belongs to. The subjects with a value are resampled ``samples`` times,
-    with replacement, each resample as many subjects as there are; a coefficient's interval is
+    ``counts`` has a row per unit as for :func:`unit_sums`; ``scan_of_unit`` says which
+    scan each unit belongs to. The scans with a value are resampled ``samples`` times,
+    with replacement, each resample as many scans as there are; a coefficient's interval is
     left out when it is undefined in more than half of them.
     """
     counts = np.asarray(counts, dtype=float)
     q = counts.shape[1]
-    subject_of_unit = np.asarray(subject_of_unit)
+    scan_of_unit = np.asarray(scan_of_unit)
     sums = unit_sums(counts)
     layout = _layout(q)
 
     rated = sums[:, layout["rated"]][:, 0] > 0
-    subjects, which = np.unique(subject_of_unit[rated], return_inverse=True)
-    per_subject = np.zeros((len(subjects), sums.shape[1]))
-    np.add.at(per_subject, which, sums[rated])
+    scans, which = np.unique(scan_of_unit[rated], return_inverse=True)
+    per_scan = np.zeros((len(scans), sums.shape[1]))
+    np.add.at(per_scan, which, sums[rated])
 
-    totals = per_subject.sum(axis=0)
+    totals = per_scan.sum(axis=0)
     point = {name: values[0] for name, values in coefficients(totals, q).items()}
     pairable = sums[:, layout["pairable"]][:, 0] > 0
     marginals = totals[layout["coincidences"]].reshape(q, q).sum(axis=1)
     values = float(marginals.sum())
 
-    intervals = _bootstrap(per_subject, q, samples, rng)
+    intervals = _bootstrap(per_scan, q, samples, rng)
     return Agreement(
-        subjects=int(len(np.unique(subject_of_unit[pairable]))),
+        scans=int(len(np.unique(scan_of_unit[pairable]))),
         items=int(pairable.sum()),
         values=int(round(values)),
         shares=tuple(float(share) for share in marginals / values) if values else None,
@@ -225,17 +225,17 @@ def agreement(
     )
 
 
-def _bootstrap(per_subject: np.ndarray, q: int, samples: int, rng: np.random.Generator) -> dict[str, tuple]:
-    """Percentile intervals of each coefficient over ``samples`` resamples of the subjects."""
-    n = len(per_subject)
+def _bootstrap(per_scan: np.ndarray, q: int, samples: int, rng: np.random.Generator) -> dict[str, tuple]:
+    """Percentile intervals of each coefficient over ``samples`` resamples of the scans."""
+    n = len(per_scan)
     empty = {name: (None, None) for name in ("agreement", "alpha", "ac1")}
     if n < 2 or samples < 1:
         return empty
     draws = rng.integers(0, n, size=(samples, n))
-    # How often each subject is drawn in each resample; a resample's sums are then a product.
+    # How often each scan is drawn in each resample; a resample's sums are then a product.
     times = np.zeros((samples, n))
     np.add.at(times, (np.repeat(np.arange(samples), n), draws.ravel()), 1.0)
-    resampled = coefficients(times @ per_subject, q)
+    resampled = coefficients(times @ per_scan, q)
     tail = 100 * (1 - CONFIDENCE) / 2
     intervals = {}
     for name, values in resampled.items():

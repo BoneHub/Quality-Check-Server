@@ -1,6 +1,6 @@
 """A reliability study server, driven over HTTP: set up, readings, end, and results.
 
-A study server (``BONEHUB_QC_MODE=study``) hands the same subjects to several raters, each
+A study server (``BONEHUB_QC_MODE=study``) hands the same scans to several raters, each
 several times, blind, and measures how far their verdicts agree. It must leave the dataset --
 and any quality-check server on it -- alone, and its results must name no rater.
 """
@@ -30,11 +30,11 @@ from qc_server.study.store import StudyStore
 
 from tests.support import QCTestCase, write_mask
 
-#: The bones of every fixture subject.
+#: The bones of every fixture scan.
 BONES = ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"]
 
-#: Six subjects with a segmentation, in dataset 1.
-GOOD = [f"001_{n:06d}" for n in range(1, 7)]
+#: Six scans with a segmentation, in dataset 1.
+GOOD = [f"ds-0001/sub-{n:06d}/scan-01" for n in range(1, 7)]
 
 
 class StudyTestCase(QCTestCase):
@@ -51,7 +51,7 @@ class StudyTestCase(QCTestCase):
 
     def prepare_dataset(self) -> None:
         for subject_id in range(1, 7):
-            self.builder.add_subject(1, subject_id, segmentation=dict.fromkeys(BONES, 1))
+            self.builder.add_scan(1, subject_id, segmentation=BONES)
 
     def build_app(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -74,8 +74,8 @@ class StudyTestCase(QCTestCase):
     def settings(self, **changes) -> dict:
         return {
             "name": "Reliability test",
-            "subject_mode": "list",
-            "subject_keys": list(GOOD),
+            "scan_mode": "list",
+            "scan_keys": list(GOOD),
             "seed": 1234,
             "raters": list(self.raters),
             "readings_per_rater": 2,
@@ -94,7 +94,7 @@ class StudyTestCase(QCTestCase):
         return {"X-API-Key": self.keys[name], "X-Client-Role": role}
 
     def next_reading(self, name: str):
-        return self.client.post("/api/v1/subjects/next", headers=self.headers(name))
+        return self.client.post("/api/v1/scans/next", headers=self.headers(name))
 
     def handout(self, name: str) -> dict:
         response = self.next_reading(name)
@@ -140,7 +140,7 @@ class StudyTestCase(QCTestCase):
 # -------------------------------------------------------------------- the server
 class ModeTests(QCTestCase):
     def test_the_mode_in_the_environment_makes_a_study_server(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         os.environ[f"{ENV_PREFIX}DATASET_ROOT"] = str(self.dataset_root)
         os.environ[f"{ENV_PREFIX}MODE"] = "study"
         with contextlib.redirect_stdout(io.StringIO()):
@@ -157,7 +157,7 @@ class ModeTests(QCTestCase):
             create_app()
 
     def test_the_cli_of_a_study_server_keeps_its_users_off_the_dataset(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         os.environ[f"{ENV_PREFIX}MODE"] = "study"
         self.addCleanup(self.close_cli_logs)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -223,16 +223,16 @@ class SetupTests(StudyTestCase):
     def prepare_dataset(self) -> None:
         super().prepare_dataset()
         # 7: no segmentation. 8: a segmentation off the image's voxel grid.
-        self.builder.add_subject(1, 7, segmentation={"FEMUR_LEFT": 0})
-        self.builder.add_subject(1, 8, segmentation=dict.fromkeys(BONES, 1), write_segmentation_file=False)
+        self.builder.add_scan(1, 7, segmentation=[])
+        self.builder.add_scan(1, 8, segmentation=BONES, write_segmentation_file=False)
         write_mask(self.builder.segmentation_file(1, 8), BONES, spacing=(2.0, 1.0, 1.0))
         for subject_id in range(1, 4):
-            self.builder.add_subject(2, subject_id, segmentation=dict.fromkeys(BONES, 1))
+            self.builder.add_scan(2, subject_id, segmentation=BONES)
 
     def test_a_preview_says_what_the_settings_make_of_the_study(self):
         preview = self.preview().json()
-        self.assertEqual([s["subject_key"] for s in preview["subjects"]], GOOD)
-        self.assertEqual({s["bones"] for s in preview["subjects"]}, {3})
+        self.assertEqual([s["scan_key"] for s in preview["scans"]], GOOD)
+        self.assertEqual({s["bones"] for s in preview["scans"]}, {3})
         self.assertEqual(sorted(r["code"] for r in preview["raters"]), ["A", "B", "C"])
         self.assertEqual((preview["readings_each"], preview["readings_total"], preview["min_gap"]), (12, 36, 3))
 
@@ -241,36 +241,37 @@ class SetupTests(StudyTestCase):
         overview = self.client.get("/admin/api/study", headers=self.admin).json()
         self.assertEqual((overview["state"], overview["settings"]["name"]), ("draft", "Draft study"))
 
-    def test_typed_subjects_without_a_segmentation_or_off_the_grid_are_refused_with_the_reason(self):
-        response = self.preview(subject_keys=[*GOOD, "1_7", "001_000008", "1_99"])
+    def test_typed_scans_without_a_segmentation_or_off_the_grid_are_refused_with_the_reason(self):
+        response = self.preview(scan_keys=[*GOOD, "1/7/1", "ds-0001/sub-000008/scan-01", "1/99/1", "1/1/2"])
         self.assertEqual(response.status_code, 400)
         detail = response.json()["detail"]
-        self.assertIn("001_000007: it has no segmentation", detail)
-        self.assertIn("001_000008: its segmentation is not on the image's voxel grid", detail)
-        self.assertIn("001_000099: it is not in the dataset's Subject_info", detail)
+        self.assertIn("ds-0001/sub-000007/scan-01: it has no segmentation", detail)
+        self.assertIn("ds-0001/sub-000008/scan-01: its segmentation is not on the image's voxel grid", detail)
+        self.assertIn("ds-0001/sub-000099/scan-01: there is no such scan", detail)
+        self.assertIn("ds-0001/sub-000001/scan-02: there is no such scan", detail)
 
     def test_a_random_pick_leaves_out_what_cannot_be_read(self):
         for seed in range(8):
             with self.subTest(seed=seed):
                 preview = self.preview(
-                    subject_mode="random", subject_keys=[], random_count=6, random_dataset_ids=[1], seed=seed
+                    scan_mode="random", scan_keys=[], random_count=6, random_dataset_ids=[1], seed=seed
                 ).json()
-                picked = {s["subject_key"] for s in preview["subjects"]}
-                self.assertEqual(picked, set(GOOD), "the six usable subjects of dataset 1, and not 7 or 8")
+                picked = {s["scan_key"] for s in preview["scans"]}
+                self.assertEqual(picked, set(GOOD), "the six usable scans of dataset 1, and not 7 or 8")
                 for skipped in preview["skipped"]:
-                    self.assertEqual(skipped["subject_key"], "001_000008")
+                    self.assertEqual(skipped["scan_key"], "ds-0001/sub-000008/scan-01")
                     self.assertIn("voxel grid", skipped["reason"])
 
     def test_the_same_seed_picks_the_same_subjects(self):
-        first = self.preview(subject_mode="random", subject_keys=[], random_count=4, seed=7).json()
-        again = self.preview(subject_mode="random", subject_keys=[], random_count=4, seed=7).json()
-        self.assertEqual(first["subjects"], again["subjects"])
+        first = self.preview(scan_mode="random", scan_keys=[], random_count=4, seed=7).json()
+        again = self.preview(scan_mode="random", scan_keys=[], random_count=4, seed=7).json()
+        self.assertEqual(first["scans"], again["scans"])
         self.assertEqual(first["raters"], again["raters"])
 
     def test_a_pick_larger_than_the_datasets_is_refused(self):
-        response = self.preview(subject_mode="random", subject_keys=[], random_count=20)
+        response = self.preview(scan_mode="random", scan_keys=[], random_count=20)
         self.assertEqual(response.status_code, 400)
-        self.assertIn("Only 9 subject(s)", response.json()["detail"])
+        self.assertIn("Only 9 scan(s)", response.json()["detail"])
 
     def test_a_gap_the_lists_cannot_keep_is_refused(self):
         response = self.preview(min_gap=6)
@@ -293,12 +294,12 @@ class SetupTests(StudyTestCase):
             self.assertIn(expected, detail)
 
     def test_settings_that_are_not_valid_are_explained(self):
-        response = self.preview(seed="abc", readings_per_rater=0, subject_keys=["12"])
+        response = self.preview(seed="abc", readings_per_rater=0, scan_keys=["12"])
         self.assertEqual(response.status_code, 400)
         detail = response.json()["detail"]
         self.assertIn("seed", detail)
         self.assertIn("readings_per_rater", detail)
-        self.assertIn("'12' is not a subject id", detail)
+        self.assertIn("'12' is not a scan such as ds-0027/sub-000012/scan-01", detail)
 
     def test_the_settings_are_fixed_once_started(self):
         self.start()
@@ -309,11 +310,11 @@ class SetupTests(StudyTestCase):
     def test_start_copies_the_segmentations_and_fixes_the_lists(self):
         overview = self.start()
         self.assertEqual(overview["state"], "running")
-        self.assertEqual([s["subject_key"] for s in overview["subjects"]], GOOD)
+        self.assertEqual([s["scan_key"] for s in overview["scans"]], GOOD)
         study = self.study.study()
-        for subject in study.subjects:
-            self.assertTrue(self.study.copy_path(subject.subject_key).is_file())
-            self.assertEqual(subject.bones, BONES)
+        for scan in study.scans:
+            self.assertTrue(self.study.copy_path(scan.scan_key).is_file())
+            self.assertEqual(scan.bones, BONES)
         for rater in study.raters:
             self.assertEqual(sorted(rater.order), sorted((key, n) for key in GOOD for n in (1, 2)))
 
@@ -332,7 +333,7 @@ class ReadingTests(StudyTestCase):
             self.assertEqual(handout["study"]["total"], 12)
             self.assertEqual(self.submit("alice", handout).status_code, 200)
         readings = self.study.readings()
-        self.assertEqual([(r.subject_key, r.reading) for r in readings], [tuple(item) for item in rater.order[:3]])
+        self.assertEqual([(r.scan_key, r.reading) for r in readings], [tuple(item) for item in rater.order[:3]])
 
     def test_a_rater_holds_one_reading_and_asking_again_gives_it_back(self):
         first = self.handout("alice")
@@ -350,18 +351,18 @@ class ReadingTests(StudyTestCase):
 
     def test_several_raters_read_the_same_subject_at_once(self):
         self.client.delete("/admin/api/study", headers=self.admin)
-        self.start(subject_keys=["001_000001"])
+        self.start(scan_keys=["ds-0001/sub-000001/scan-01"])
         handouts = {name: self.handout(name) for name in self.raters}
         self.assertEqual(len({handout["assignment_id"] for handout in handouts.values()}), 3)
         for name, handout in handouts.items():
-            self.assertEqual(self.subject_of(name, handout), "001_000001")
+            self.assertEqual(self.subject_of(name, handout), "ds-0001/sub-000001/scan-01")
         for name, handout in handouts.items():
             self.assertEqual(self.submit(name, handout).status_code, 200)
 
     def subject_of(self, name: str, handout: dict) -> str:
-        """The subject behind a reading, as the server knows it."""
+        """The scan behind a reading, as the server knows it."""
         held = self.study.held_reading(handout["assignment_id"], self.store.authenticate(self.keys[name]))
-        return self.study.reading_context(held)[2].subject_key
+        return self.study.reading_context(held)[2].scan_key
 
     def test_a_reviewer_who_is_not_a_rater_gets_nothing(self):
         self.keys["dave"] = self.create_rater("dave")
@@ -383,47 +384,60 @@ class ReadingTests(StudyTestCase):
 
 class BlindTests(StudyTestCase):
     def test_a_reading_shows_no_history_and_no_earlier_verdict(self):
-        """Not even Subject_info's: a bone it lists as reviewed (2), or a remark, would say what
-        someone made of the subject before."""
-        statuses = {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1, "TIBIA_LEFT": 1}
-        self.builder.add_subject(1, 9, segmentation=statuses, remarks="QC: hip implant")
-        self.start(subject_keys=["001_000009"])
+        """Not even scan.json's: a bone it gives as drawn by hand, a bone reviewed already, or a
+        remark, would say what someone made of the scan before."""
+        self.builder.add_scan(
+            1, 9, segmentation={"FEMUR_LEFT": "manual", "FEMUR_RIGHT": "source", "TIBIA_LEFT": "source"},
+            reviewed=["FEMUR_LEFT"], remarks="QC: hip implant",
+        )
+        self.start(scan_keys=["ds-0001/sub-000009/scan-01"])
         handout = self.handout("alice")
         self.assertEqual((handout["history"], handout["requests"], handout["subject_info"]), ([], [], {}))
-        self.assertNotIn("implant", json.dumps(handout))
+        self.assertEqual((handout["scan_info"], handout["segmentation_labels"]), ({"modality": "CT"}, {}))
+        text = json.dumps(handout)
+        self.assertNotIn("implant", text)
+        self.assertNotIn("manual", text)
         self.assertEqual([label["name"] for label in handout["labels"]], BONES)
         for label in handout["labels"]:
-            self.assertEqual((label["state"], label["dataset_status"], label["by"]), ("pending", None, None))
+            self.assertEqual(
+                (label["state"], label["origin"], label["reviewed"], label["by"]), ("pending", None, False, None)
+            )
 
-    def test_the_subject_id_is_hidden_unless_the_study_shows_it(self):
-        self.start(show_subject_id=False)
+    def test_the_scan_id_is_hidden_unless_the_study_shows_it(self):
+        self.start(show_scan_id=False)
         handout = self.handout("alice")
         text = json.dumps(handout)
-        self.assertNotIn("001_0000", text)
-        self.assertIsNone(handout["subject_key"])
+        self.assertNotIn("sub-0000", text)
+        self.assertNotIn("case_", text)
+        self.assertIsNone(handout["scan_key"])
         self.assertEqual(handout["study"]["title"], "Reading 1")
-        self.assertEqual(handout["dataset_info"], {"modality": "CT"}, "the dataset is not named either")
+        self.assertEqual(handout["scan_info"], {"modality": "CT"}, "the modality, to window the image")
+        self.assertEqual(handout["dataset_info"], {}, "the dataset is not named either")
         for part, name in (("image", "reading.nii.gz"), ("segmentation", "reading.seg.nrrd")):
             response = self.client.get(f"/api/v1/assignments/{handout['assignment_id']}/{part}", headers=self.headers("alice"))
             self.assertEqual(response.status_code, 200)
             self.assertIn(f'filename="{name}"', response.headers["content-disposition"])
 
-    def test_the_study_can_show_the_subject_id(self):
-        self.start(show_subject_id=True)
+    def test_the_study_can_show_the_scan_id(self):
+        self.start(show_scan_id=True)
         handout = self.handout("alice")
-        self.assertIn(handout["subject_key"], GOOD)
-        self.assertEqual(handout["study"]["title"], handout["subject_key"])
+        self.assertIn(handout["scan_key"], GOOD)
+        self.assertEqual(handout["study"]["title"], handout["scan_key"])
+        self.assertEqual(handout["dataset_info"]["name"], "Test dataset 1")
+        stem = handout["scan_key"].replace("/", "_")
+        response = self.client.get(f"/api/v1/assignments/{handout['assignment_id']}/image", headers=self.headers("alice"))
+        self.assertIn(f'filename="{stem}.nii.gz"', response.headers["content-disposition"])
 
     def test_every_reading_is_served_the_studys_copy(self):
         """The dataset's segmentation may change while the study runs; the raters' does not."""
         self.start()
-        copies = {s.subject_key: s.segmentation_sha256 for s in self.study.study().subjects}
+        copies = {s.scan_key: s.segmentation_sha256 for s in self.study.study().scans}
         for subject_id in range(1, 7):
             write_mask(self.builder.segmentation_file(1, subject_id), ["SACRUM"])
         handout = self.handout("alice")
         served = self.client.get(f"/api/v1/assignments/{handout['assignment_id']}/segmentation", headers=self.headers("alice"))
         held = self.study.held_reading(handout["assignment_id"], self.store.authenticate(self.keys["alice"]))
-        key = self.study.reading_context(held)[2].subject_key
+        key = self.study.reading_context(held)[2].scan_key
         self.assertEqual(hashlib.sha256(served.content).hexdigest(), copies[key])
         self.assertEqual([label["name"] for label in handout["labels"]], BONES)
 
@@ -455,9 +469,9 @@ class VerdictTests(StudyTestCase):
     def test_rejecting_the_subject_as_a_whole_rejects_every_bone(self):
         response = self.submit("alice", self.reading, quality_check_confirmed=False, comment="hip implant")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertTrue(response.json()["subject_rejected"])
+        self.assertTrue(response.json()["scan_rejected"])
         [reading] = self.study.readings()
-        self.assertTrue(reading.subject_rejected)
+        self.assertTrue(reading.scan_rejected)
         self.assertEqual(reading.verdicts, dict.fromkeys(BONES, "reject"))
         self.assertEqual(reading.comment, "hip implant")
 
@@ -467,23 +481,23 @@ class VerdictTests(StudyTestCase):
         rows = list(csv.DictReader(io.StringIO(readings_csv(self.study.study(), self.study.readings()))))
         first = [(row["bone"], row["verdict"]) for row in rows if row["position"] == "1"]
         second = [(row["bone"], row["verdict"]) for row in rows if row["position"] == "2"]
-        self.assertEqual(first, [(bone, "subject_rejected") for bone in BONES])
+        self.assertEqual(first, [(bone, "scan_rejected") for bone in BONES])
         self.assertEqual(second, [("FEMUR_LEFT", "accept"), ("FEMUR_RIGHT", "accept"), ("TIBIA_LEFT", "reject")])
 
     def test_rejecting_the_subject_and_rejecting_every_bone_disagree(self):
-        """A rejected bone can be corrected; a rejected subject is not used at all."""
+        """A rejected bone can be corrected; a rejected scan is not used at all."""
         study = self.study.study()
         first, second = (rater.code for rater in study.raters[:2])
 
-        def reading(code: str, subject_rejected: bool = False) -> Reading:
+        def reading(code: str, scan_rejected: bool = False) -> Reading:
             return Reading(
-                assignment_id=code, rater=code, code=code, position=1, subject_key=GOOD[0], reading=1, handed_at="",
-                submitted_at="", verdicts=dict.fromkeys(BONES, "reject"), subject_rejected=subject_rejected,
+                assignment_id=code, rater=code, code=code, position=1, scan_key=GOOD[0], reading=1, handed_at="",
+                submitted_at="", verdicts=dict.fromkeys(BONES, "reject"), scan_rejected=scan_rejected,
             )  # fmt: skip
 
         every_bone = compute_results(study, [reading(first), reading(second)]).group
         self.assertEqual((every_bone.items, every_bone.agreement.value), (3, 1.0))
-        one_subject = compute_results(study, [reading(first), reading(second, subject_rejected=True)]).group
+        one_subject = compute_results(study, [reading(first), reading(second, scan_rejected=True)]).group
         self.assertEqual((one_subject.items, one_subject.agreement.value), (3, 0.0))
 
     def test_a_reading_uploads_nothing(self):
@@ -603,7 +617,7 @@ class ResultsTests(StudyTestCase):
     def test_the_readings_csv_has_a_row_per_bone_per_reading(self):
         rows = list(csv.DictReader(io.StringIO(self.results().read("readings.csv").decode("utf-8"))))
         self.assertEqual(len(rows), 4 * 12 * 3)
-        self.assertEqual(set(rows[0]), {"rater", "subject", "reading", "position", "bone", "verdict", "handed_out_at",
+        self.assertEqual(set(rows[0]), {"rater", "scan", "reading", "position", "bone", "verdict", "handed_out_at",
                                         "submitted_at", "comment"})
         self.assertEqual({row["rater"] for row in rows}, {"A", "B", "C", "D"})
         self.assertEqual({row["verdict"] for row in rows}, {"accept", "reject"})
@@ -663,7 +677,7 @@ class ResultsTests(StudyTestCase):
         report = self.client.get("/admin/api/study/report", headers=self.admin).text
         self.assertIn("Provisional", report)
         self.assertIn("Figure 1.", report, "one rater who read everything twice can be compared with themselves")
-        self.assertIn("Nothing to compare yet: no subject has been read by two raters", report)
+        self.assertIn("Nothing to compare yet: no scan has been read by two raters", report)
         self.assertEqual([n for n in self.results().namelist() if n.startswith("figures/")],
                          ["figures/figure1_intra_rater.svg", "figures/figure1_intra_rater.png"])
 

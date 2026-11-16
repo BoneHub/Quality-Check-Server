@@ -7,20 +7,20 @@ role, or every request is refused: a reviewer connecting from 3D Slicer is point
 review page, and an editor cannot sign in to the review page. The flow a client follows is:
 
 1. ``GET  /api/v1/ping``                          - check the key, its role and the server
-2. ``POST /api/v1/subjects/next``                 - lease the next subject for this role
+2. ``POST /api/v1/scans/next``                    - lease the next scan for this role
 3. ``GET  /api/v1/assignments/{id}/image``        - download the image
 4. ``GET  /api/v1/assignments/{id}/segmentation`` - download the segmentation, if any
 5. ``POST /api/v1/assignments/{id}/submit``       - send the verdict back
 
-A reviewer is handed subjects waiting for a review, and judges each label of the segmentation
+A reviewer is handed scans waiting for a review, and judges each label of the segmentation
 as it is: ``use_stored_segmentation``, with labels accepted, rejected, or reported missing. An
-editor is handed the subjects reviewers sent back, and uploads the corrected segmentation.
+editor is handed the scans reviewers sent back, and uploads the corrected segmentation.
 Verdicts are kept in the server's state folder; nothing reaches the dataset before the
-administrator approves the subject. The segmentation handed out is the one under review: an
-editor's correction waiting for approval, or the dataset's own.
+administrator approves the scan. The segmentation handed out is the one under review: an
+editor's correction waiting for approval, or the scan's own.
 
 Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways. What a user is sent of
-a subject follows their account's ``data_access``: a file left out is missing from the handout
+a scan follows their account's ``data_access``: a file left out is missing from the handout
 and refused at its download endpoint.
 """
 
@@ -34,9 +34,10 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from bonehub_data_schema import SEGMENTATION_SUFFIX, VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION, SEGMENTATION_SUFFIX
 
 from . import __version__
+from .config import ORIGIN_KINDS, REVIEW_STATES
 from .models import (
     DATA_ACCESS_DESCRIPTIONS,
     EDITOR,
@@ -44,7 +45,7 @@ from .models import (
     Assignment,
     HandoutLabel,
     HandoutSegment,
-    SubjectHandout,
+    ScanHandout,
     SubmissionRequest,
     SubmissionResult,
     User,
@@ -103,47 +104,48 @@ def ping(request: Request, user: User = Depends(get_user), role: str = Depends(c
         "allowed_dataset_ids": user.allowed_dataset_ids,
         "data_access": user.data_access,
         "edits_need_review": store.config.edits_need_review,
-        "mark_removed_labels_absent": store.config.mark_removed_labels_absent,
         "lease_ttl_seconds": store.config.lease_ttl_seconds,
     }
 
 
 @router.get("/labels")
 def labels(user: User = Depends(get_user)) -> dict:
-    """The BoneHub label map and label statuses, so the client can name and check segments."""
+    """The BoneHub label map, so the client can name and check segments, and what the origins
+    of labels and their review states mean."""
     return {
         "schema_version": SCHEMA_VERSION,
         "label_name_to_value": LABEL_NAME_TO_VALUE,
-        "label_status_values": {str(k): v for k, v in VALID_LABEL_VALUES.items()},
+        "label_origins": ORIGIN_KINDS,
+        "review_states": REVIEW_STATES,
         "segmentation_suffix": SEGMENTATION_SUFFIX,
     }
 
 
-@router.post("/subjects/next", response_model=SubjectHandout)
-def next_subject(
+@router.post("/scans/next", response_model=ScanHandout)
+def next_scan(
     request: Request, user: User = Depends(get_user), role: str = Depends(client_role)
-) -> SubjectHandout:
-    """Lease the next subject for this user, in the role of their client.
+) -> ScanHandout:
+    """Lease the next scan for this user, in the role of their client.
 
-    A reviewer is handed a subject waiting for a review, an editor one a reviewer sent back,
-    or one without any segmentation. A user holds one subject at a time in each role: if they
+    A reviewer is handed a scan waiting for a review, an editor one a reviewer sent back,
+    or one without any segmentation. A user holds one scan at a time in each role: if they
     already hold one, it is returned again instead of an error, so a client that lost its
-    local copy can simply ask for the next subject again.
+    local copy can simply ask for the next scan again.
     """
     store = get_store(request)
-    return _handout(store, store.next_subject(user, role), user)
+    return _handout(store, store.next_scan(user, role), user)
 
 
 @router.get("/assignments", response_model=list[Assignment])
 def my_assignments(
     request: Request, user: User = Depends(get_user), role: str = Depends(client_role)
 ) -> list[Assignment]:
-    """The subjects this user holds in the role of this client."""
+    """The scans this user holds in the role of this client."""
     return get_store(request).open_assignments_of(user.name, role)
 
 
-@router.get("/assignments/{assignment_id}", response_model=SubjectHandout)
-def assignment_detail(assignment_id: str, request: Request, user: User = Depends(get_user)) -> SubjectHandout:
+@router.get("/assignments/{assignment_id}", response_model=ScanHandout)
+def assignment_detail(assignment_id: str, request: Request, user: User = Depends(get_user)) -> ScanHandout:
     store = get_store(request)
     return _handout(store, store.get_assignment(assignment_id, user), user)
 
@@ -153,34 +155,34 @@ def download_image(assignment_id: str, request: Request, user: User = Depends(ge
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
     _require_sent(user, "image", user.receives_image)
-    path = store.image_path(assignment.dataset_id, assignment.subject_id)
+    path = store.image_path(assignment.scan_key)
     if not path.exists():
-        raise QCError(f"The image for {assignment.subject_key} is missing on the server.", status_code=404)
+        raise QCError(f"The image for {assignment.scan_key} is missing on the server.", status_code=404)
     return _send_from_share(path, media_type="application/gzip")
 
 
 @router.get("/assignments/{assignment_id}/segmentation")
 def download_segmentation(assignment_id: str, request: Request, user: User = Depends(get_user)) -> StreamingResponse:
     """The segmentation under quality check (``.seg.nrrd``): an editor's correction waiting for
-    approval, or else the dataset's own."""
+    approval, or else the scan's own."""
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
     _require_sent(user, "segmentation", user.receives_segmentation)
-    path = store.current_segmentation_path(assignment.dataset_id, assignment.subject_id)
+    path = store.current_segmentation_path(assignment.scan_key)
     if path is None:
-        raise QCError(f"Subject {assignment.subject_key} has no segmentation yet.", status_code=404)
+        raise QCError(f"Scan {assignment.scan_key} has no segmentation yet.", status_code=404)
     return _send_from_share(path, media_type="application/octet-stream")
 
 
 @router.post("/assignments/{assignment_id}/extend", response_model=Assignment)
 def extend_assignment(assignment_id: str, request: Request, user: User = Depends(get_user)) -> Assignment:
-    """Keep the lease alive while the user is still working on the subject."""
+    """Keep the lease alive while the user is still working on the scan."""
     return get_store(request).extend_assignment(assignment_id, user)
 
 
 @router.post("/assignments/{assignment_id}/release", response_model=Assignment)
 def release_assignment(assignment_id: str, request: Request, user: User = Depends(get_user)) -> Assignment:
-    """Return a subject to the queue without judging it."""
+    """Return a scan to the queue without judging it."""
     return get_store(request).release_assignment(assignment_id, user)
 
 
@@ -198,17 +200,17 @@ def submit(
     user: User = Depends(get_user),
     role: str = Depends(client_role),
 ) -> SubmissionResult:
-    """Receive a user's verdict, in the role the subject was handed out in.
+    """Receive a user's verdict, in the role the scan was handed out in.
 
     A reviewer sends ``use_stored_segmentation`` and no file, with each label under review
     accepted (``confirmed_labels``) or rejected (``rejected_labels``), and bones the
     segmentation lacks in ``missing_labels``. An editor uploads the corrected segmentation.
-    ``quality_check_confirmed=false`` rejects the subject as a whole, and it goes to the
+    ``quality_check_confirmed=false`` rejects the scan as a whole, and it goes to the
     administrator: from a reviewer, as no correction of its segmentation would help; from an
     editor, as beyond correction.
 
     The verdict is kept in the server's state folder. Nothing in the dataset changes until the
-    administrator approves the subject.
+    administrator approves the scan.
     """
     store = get_store(request)
 
@@ -242,7 +244,7 @@ def submit(
 
     return SubmissionResult(
         assignment_id=outcome.assignment.assignment_id,
-        subject_key=outcome.assignment.subject_key,
+        scan_key=outcome.assignment.scan_key,
         quality_check_confirmed=bool(outcome.assignment.quality_check_confirmed),
         state=outcome.assignment.state,
         stage=outcome.stage,
@@ -276,33 +278,35 @@ def _require_role(user: User, role: str | None, review_page: str) -> None:
     if role == EDITOR:
         raise QCError(
             f"'{user.name}' is a reviewer, not an editor, so cannot work in 3D Slicer, where segmentations are "
-            f"corrected. Review subjects in the browser instead, on the review page: {review_page}",
+            f"corrected. Review scans in the browser instead, on the review page: {review_page}",
             status_code=403,
         )
     raise QCError(
-        f"'{user.name}' is an editor, not a reviewer, so cannot sign in to the review page. Work on subjects "
+        f"'{user.name}' is an editor, not a reviewer, so cannot sign in to the review page. Work on scans "
         "in 3D Slicer instead, with the BoneHub Quality Check extension.",
         status_code=403,
     )
 
 
-def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHandout:
-    dataset_id, subject_id = assignment.dataset_id, assignment.subject_id
-    subject = store.subject_info(dataset_id, subject_id)
-    segmentation_labels = dict(subject.segmentation or {})
+def _handout(store: QCStore, assignment: Assignment, user: User) -> ScanHandout:
+    key = assignment.scan_key
+    scan = store.scan_info(key)
+    segmentation_labels = dict(scan.segmentation or {})
     case = store.handout_case(assignment)
-    current = store.current_segmentation_path(dataset_id, subject_id)
+    reviewed = set(case.reviewed_before)
+    current = store.current_segmentation_path(key)
     # Only what this user is sent is offered; the download endpoints refuse the rest.
-    has_image = user.receives_image and store.image_path(dataset_id, subject_id).exists()
+    has_image = user.receives_image and store.image_path(key).exists()
     has_segmentation = user.receives_segmentation and current is not None
-    segments = store.segment_table(dataset_id, subject_id) if has_segmentation else []
-    issue = store.stored_segmentation_issue(dataset_id, subject_id) if has_segmentation else None
+    segments = store.segment_table(key) if has_segmentation else []
+    issue = store.stored_segmentation_issue(key) if has_segmentation else None
     base = f"/api/v1/assignments/{assignment.assignment_id}"
-    return SubjectHandout(
+    return ScanHandout(
         assignment_id=assignment.assignment_id,
-        dataset_id=dataset_id,
-        subject_id=subject_id,
-        subject_key=assignment.subject_key,
+        scan_key=key,
+        dataset_id=assignment.dataset_id,
+        subject_id=assignment.subject_id,
+        scan_id=assignment.scan_id,
         expires_at=assignment.expires_at,
         role=assignment.role,
         stage=case.stage,
@@ -315,7 +319,8 @@ def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHando
             HandoutLabel(
                 name=name,
                 value=LABEL_NAME_TO_VALUE.get(name),
-                dataset_status=segmentation_labels.get(name),
+                origin=segmentation_labels.get(name),
+                reviewed=name in reviewed,
                 state=label.state,
                 painted=label.painted,
                 by=label.by,
@@ -336,8 +341,9 @@ def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHando
             for segment in segments
         ],
         stored_segmentation_issue=issue,
-        subject_info=subject.sorted_dict(),
-        dataset_info=store.dataset_info(dataset_id),
+        scan_info=scan.to_dict(),
+        subject_info=store.subject_info(key),
+        dataset_info=store.dataset_info(assignment.dataset_id),
         image_url=f"{base}/image" if has_image else None,
         segmentation_url=f"{base}/segmentation" if has_segmentation else None,
     )
@@ -348,7 +354,7 @@ def _send_from_share(path: Path, media_type: str) -> StreamingResponse:
 
     The server reaches the share over one SMB connection. Read the usual way, a download fills
     that connection with megabytes of read-ahead, and every other request waits behind them:
-    on a 17 MB/s share, another user's next subject took as long as the whole download, 13 s
+    on a 17 MB/s share, another user's next scan took as long as the whole download, 13 s
     instead of 0.2 s. Read 2 MB at a time with read-ahead off, it took 1.8 s, and the download
     was as fast.
     """

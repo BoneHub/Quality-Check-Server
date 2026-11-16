@@ -28,7 +28,7 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--dataset-root",
         type=Path,
         default=os.environ.get(f"{ENV_PREFIX}DATASET_ROOT"),
-        help="Folder in BoneHub data structure format. Defaults to $BONEHUB_QC_DATASET_ROOT.",
+        help="Database in the BoneHub format. Defaults to $BONEHUB_QC_DATASET_ROOT.",
     )
     parser.add_argument(
         "--credentials-dir",
@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-access",
         choices=list(DATA_ACCESS_DESCRIPTIONS),
         default=DEFAULT_DATA_ACCESS,
-        help="What the user is sent of each subject (default: %(default)s).",
+        help="What the user is sent of each scan (default: %(default)s).",
     )
     add_user.add_argument("--note", default="")
 
@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     show_key = subparsers.add_parser("show-admin-key", help="Print this server's admin key.")
     _add_common(show_key)
 
-    sessions = subparsers.add_parser("sessions", help="List the servers that have kept state in this dataset.")
+    sessions = subparsers.add_parser("sessions", help="List the servers that have kept state in this database.")
     _add_common(sessions)
 
     stats = subparsers.add_parser("stats", help="Print queue statistics.")

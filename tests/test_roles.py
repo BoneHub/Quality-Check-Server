@@ -40,7 +40,7 @@ class AccountTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=1)
+        self.default_dataset(n_scans=1)
         self.store = self.make_store()
 
     def test_a_new_user_is_a_reviewer_and_an_editor(self):
@@ -139,13 +139,13 @@ class ClientRoleTests(ApiTestCase):
 
     def test_every_client_endpoint_checks_the_role(self):
         """Not only the sign-in: a client in the wrong role gets nowhere with the key."""
-        handout = self.next_subject(self.reviewer_key, REVIEWER)
+        handout = self.next_scan(self.reviewer_key, REVIEWER)
         base = f"/api/v1/assignments/{handout['assignment_id']}"
         wrong = self.headers(self.reviewer_key, EDITOR)
         for method, path in [
             ("get", "/api/v1/ping"),
             ("get", "/api/v1/labels"),
-            ("post", "/api/v1/subjects/next"),
+            ("post", "/api/v1/scans/next"),
             ("get", "/api/v1/assignments"),
             ("get", base),
             ("get", f"{base}/image"),
@@ -173,8 +173,8 @@ class ClientRoleTests(ApiTestCase):
         self.assertEqual(self.ping("bhqc_wrong", REVIEWER).status_code, 401)
 
     def test_a_role_taken_away_applies_at_once(self):
-        """alice holds a subject on the review page when the admin makes her an editor only."""
-        handout = self.next_subject(self.alice_key, REVIEWER)
+        """alice holds a scan on the review page when the admin makes her an editor only."""
+        handout = self.next_scan(self.alice_key, REVIEWER)
         self.client.patch("/admin/api/users/alice", json={"roles": [EDITOR]}, headers=self.admin_headers)
 
         refused = self.client.get(handout["image_url"], headers=self.headers(self.alice_key, REVIEWER))
@@ -193,22 +193,22 @@ class VerdictTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
         for subject_id in (1, 2):
-            self.builder.add_subject(1, subject_id, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+            self.builder.add_scan(1, subject_id, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.store = self.make_store()
         self.rita = self.store.create_user("rita", roles=[REVIEWER])[0]
         self.eddie = self.store.create_user("eddie", roles=[EDITOR])[0]
         self.before = self.dataset_state()
 
     def send_to_the_editors(self):
-        """rita rejects the right femur of subject 1, and eddie is handed it."""
+        """rita rejects the right femur of scan 1, and eddie is handed it."""
         self.review(self.store, self.rita, rejected=["FEMUR_RIGHT"])
-        return self.store.next_subject(self.eddie, EDITOR)
+        return self.store.next_scan(self.eddie, EDITOR)
 
     def assert_untouched(self):
         self.assertEqual(self.dataset_state(), self.before)
 
     def test_a_reviewer_cannot_upload_a_segmentation(self):
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         with self.assertRaises(QCError) as ctx:
             self.store.submit(assignment.assignment_id, self.rita, True, self.upload_file(["FEMUR_LEFT"]))
         self.assertEqual(ctx.exception.status_code, 403)
@@ -216,7 +216,7 @@ class VerdictTests(QCTestCase):
         self.assert_untouched()
 
     def test_a_reviewer_judges_the_stored_segmentation_as_it_is(self):
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         outcome = self.store.submit(assignment.assignment_id, self.rita, True, None, use_stored_segmentation=True)
         self.assertEqual(outcome.stage, "approval")
         self.assert_untouched()
@@ -238,7 +238,10 @@ class VerdictTests(QCTestCase):
             assignment.assignment_id, self.eddie, True, self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])
         )
         self.assertTrue(outcome.segmentation_staged)
-        self.assertEqual(labels_in_mask(self.store.current_segmentation_path(1, 1)), {"FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"})
+        self.assertEqual(
+            labels_in_mask(self.store.current_segmentation_path("ds-0001/sub-000001/scan-01")),
+            {"FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"},
+        )
         self.assert_untouched()
 
     def test_either_role_can_reject(self):
@@ -251,8 +254,8 @@ class VerdictTests(QCTestCase):
         alice = self.store.create_user("alice")[0]
         self.review(self.store, alice, rejected=["FEMUR_RIGHT"])
         outcome = self.edit(self.store, alice, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
-        self.assertEqual((outcome.assignment.subject_key, outcome.stage), ("001_000001", "review"))
-        self.assertEqual(self.store.next_subject(alice, REVIEWER).subject_key, "001_000002")
+        self.assertEqual((outcome.assignment.scan_key, outcome.stage), ("ds-0001/sub-000001/scan-01", "review"))
+        self.assertEqual(self.store.next_scan(alice, REVIEWER).scan_key, "ds-0001/sub-000002/scan-01")
         self.assert_untouched()
 
 
@@ -260,7 +263,7 @@ class ReviewerUploadOverHttpTests(ApiTestCase):
     def test_naming_the_reviewer_role_does_not_let_a_reviewer_upload(self):
         """The header is the client's word; the account decides what may be done to the dataset."""
         key = self.create_client_user("rita", roles=[REVIEWER])
-        handout = self.next_subject(key, REVIEWER)
+        handout = self.next_scan(key, REVIEWER)
         before = self.builder.segmentation_file(1, 1).read_bytes()
         response = self.submit(key, handout["assignment_id"], True, ["FEMUR_LEFT"], role=REVIEWER)
         self.assertEqual(response.status_code, 403)
@@ -269,29 +272,29 @@ class ReviewerUploadOverHttpTests(ApiTestCase):
 
 
 class QueueTests(QCTestCase):
-    """A reviewer can do nothing with a subject that has no segmentation, so is not handed one."""
+    """A reviewer can do nothing with a scan that has no segmentation, so is not handed one."""
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation=None)
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
-        self.store = self.make_store(include_subjects_without_segmentation=True)
+        self.builder.add_scan(1, 1, segmentation=None)
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
+        self.store = self.make_store(include_scans_without_segmentation=True)
         self.alice = self.store.create_user("alice")[0]
         self.bob = self.store.create_user("bob")[0]
 
     def test_a_reviewer_is_handed_only_subjects_with_a_segmentation(self):
-        self.assertEqual(self.store.next_subject(self.alice, REVIEWER).subject_id, 2)
-        self.assertEqual(self.store.next_subject(self.bob, EDITOR).subject_id, 1)
+        self.assertEqual(self.store.next_scan(self.alice, REVIEWER).subject_id, 2)
+        self.assertEqual(self.store.next_scan(self.bob, EDITOR).subject_id, 1)
 
     def test_with_only_such_subjects_left_the_queue_is_empty_for_reviewers(self):
-        self.store.next_subject(self.alice, REVIEWER)
+        self.store.next_scan(self.alice, REVIEWER)
         with self.assertRaises(QCError) as ctx:
-            self.store.next_subject(self.bob, REVIEWER)
+            self.store.next_scan(self.bob, REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)
-        self.assertEqual(self.store.next_subject(self.bob, EDITOR).subject_id, 1)
+        self.assertEqual(self.store.next_scan(self.bob, EDITOR).subject_id, 1)
 
     def test_the_lease_records_the_role_it_was_asked_in(self):
-        assignment = self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_scan(self.alice, REVIEWER)
         self.assertEqual(assignment.role, REVIEWER)
         self.assertEqual(self.store.audit.read_recent(kind="assigned")[0]["role"], REVIEWER)
         self.assertIn("to 'alice' as reviewer", (self.state_dir / "server.log").read_text(encoding="utf-8"))
@@ -299,15 +302,15 @@ class QueueTests(QCTestCase):
 
 class ReviewPageQueueTests(ApiTestCase):
     def prepare_dataset(self) -> None:
-        self.builder.add_subject(1, 1, segmentation=None)
+        self.builder.add_scan(1, 1, segmentation=None)
 
     def build_config(self):
-        return QCServerConfig(include_subjects_without_segmentation=True)
+        return QCServerConfig(include_scans_without_segmentation=True)
 
     def test_the_review_page_is_not_handed_a_subject_without_a_segmentation(self):
-        refused = self.client.post("/api/v1/subjects/next", headers=self.headers(self.alice_key, REVIEWER))
+        refused = self.client.post("/api/v1/scans/next", headers=self.headers(self.alice_key, REVIEWER))
         self.assertEqual(refused.status_code, 404)
-        self.assertFalse(self.next_subject(self.alice_key, EDITOR)["has_segmentation"])
+        self.assertFalse(self.next_scan(self.alice_key, EDITOR)["has_segmentation"])
 
 
 class AdminPanelTests(ApiTestCase):
@@ -357,7 +360,7 @@ class AdminPanelTests(ApiTestCase):
 class CommandLineTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=1)
+        self.default_dataset(n_scans=1)
 
     def cli(self, command: str, *argv: str) -> str:
         buffer = io.StringIO()
@@ -416,7 +419,7 @@ class ReferenceClientTests(LiveServerTestCase):
     def test_it_can_work_as_a_reviewer(self):
         client = BoneHubQCClient(self.base_url, self.reviewer_key, timeout=30, role=REVIEWER)
         self.assertEqual(client.ping()["role"], REVIEWER)
-        handout = client.next_subject()
+        handout = client.next_scan()
         image = client.download_image(handout["assignment_id"], self.tmp_path / "work" / "image.nii.gz")
         self.assertEqual(image.read_bytes(), self.builder.image_file(1, handout["subject_id"]).read_bytes())
 

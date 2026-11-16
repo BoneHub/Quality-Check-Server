@@ -1,13 +1,13 @@
-"""A subject's way through the quality check: reviewers first, editors for what they reject.
+"""A scan's way through the quality check: reviewers first, editors for what they reject.
 
 Requirements under test: "collect all the submissions in the server created workspace folder
 [...] only after admin approval, things are overwritten in the bonehub dataset"; "all the bone
 labels whose value is 1 need review and they must be passed to the reviewers"; "reviewer rejects
 a segmentation quality for a bone label (either bad quality or should not even exist for that
-subject) -> server tags it as a subject that must be passed to editor"; "reviewer accepts a
+scan) -> server tags it as a scan that must be passed to editor"; "reviewer accepts a
 segmentation quality for a bone label -> server tags it as accepted -> keeps it for the final
-admin approval"; "all the rejected subjects by the reviewers are leased to the editors ->
-editors submit the new segmentations -> server tags them as subjects that need to be reviewed
+admin approval"; "all the rejected scans by the reviewers are leased to the editors ->
+editors submit the new segmentations -> server tags them as scans that need to be reviewed
 after edit (optional and controllable in admin panel [...]) -> passed to reviewers or waits for
 admin final approval".
 
@@ -26,17 +26,17 @@ from qc_server.store import QCError
 
 from tests.support import QCTestCase, labels_in_mask, write_mask
 
-KEY = "001_000001"
+KEY = "ds-0001/sub-000001/scan-01"
 
 
 class WorkflowTestCase(QCTestCase):
-    """One subject whose two labels nobody has reviewed yet, a reviewer and an editor."""
+    """One scan whose two labels nobody has reviewed yet, a reviewer and an editor."""
 
     config: dict = {}
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.store = self.make_store(**self.config)
         self.rita = self.store.create_user("rita", roles=[REVIEWER])[0]
         self.eddie = self.store.create_user("eddie", roles=[EDITOR])[0]
@@ -64,7 +64,7 @@ class NothingReachesTheDatasetTests(WorkflowTestCase):
         self.reject_right_femur()
         self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
         self.assertEqual(self.dataset_state(), before)
-        self.assertTrue((self.state_dir / "staged" / "Dataset_001" / f"{KEY}.seg.nrrd").exists())
+        self.assertTrue((self.state_dir / "staged" / KEY / "segmentation.seg.nrrd").exists())
 
     def test_accepting_everything_changes_nothing_in_the_dataset_either(self):
         before = self.dataset_state()
@@ -80,7 +80,7 @@ class NothingReachesTheDatasetTests(WorkflowTestCase):
     def test_the_verdicts_are_in_the_state_folder(self):
         self.reject_right_femur()
         stored = json.loads((self.state_dir / "cases.json").read_text(encoding="utf-8"))
-        self.assertEqual([case["subject_key"] for case in stored], [KEY])
+        self.assertEqual([case["scan_key"] for case in stored], [KEY])
         self.assertEqual(stored[0]["stage"], "edit")
         self.assertEqual(stored[0]["labels"]["FEMUR_RIGHT"]["state"], "rejected")
         self.assertEqual(stored[0]["events"][0]["comment"], "femoral head cut off")
@@ -98,49 +98,62 @@ class ReviewersFirstTests(QCTestCase):
         store = self.make_store(**config)
         return store, store.create_user("rita", roles=[REVIEWER])[0], store.create_user("eddie", roles=[EDITOR])[0]
 
-    def test_a_subject_nobody_has_looked_at_goes_to_a_reviewer(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+    def test_a_scan_nobody_has_looked_at_goes_to_a_reviewer(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"])
         store, rita, eddie = self.open()
         with self.assertRaises(QCError) as ctx:
-            store.next_subject(eddie, EDITOR)
+            store.next_scan(eddie, EDITOR)
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertIn("an editor", ctx.exception.message)
-        self.assertEqual(store.next_subject(rita, REVIEWER).subject_key, KEY)
+        self.assertEqual(store.next_scan(rita, REVIEWER).scan_key, KEY)
 
     def test_only_labels_not_reviewed_yet_are_under_review(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], reviewed=["FEMUR_LEFT"])
         store, rita, _ = self.open()
-        case = store.handout_case(store.next_subject(rita, REVIEWER))
+        case = store.handout_case(store.next_scan(rita, REVIEWER))
         self.assertEqual({name: label.state for name, label in case.labels.items()},
                          {"FEMUR_LEFT": "kept", "FEMUR_RIGHT": "pending"})
 
     def test_labels_already_reviewed_are_under_review_when_the_policy_says_so(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
-        store, rita, _ = self.open(eligible_label_values=[1, 2])
-        case = store.handout_case(store.next_subject(rita, REVIEWER))
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], reviewed=["FEMUR_LEFT"])
+        store, rita, _ = self.open(eligible_review_states=["not_reviewed", "reviewed"])
+        case = store.handout_case(store.next_scan(rita, REVIEWER))
         self.assertEqual({label.state for label in case.labels.values()}, {"pending"})
+        self.assertEqual(case.reviewed_before, ["FEMUR_LEFT"])
+
+    def test_a_second_review_takes_only_the_labels_reviewed_already(self):
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], reviewed=["FEMUR_LEFT"])
+        store, rita, _ = self.open(eligible_review_states=["reviewed"])
+        case = store.handout_case(store.next_scan(rita, REVIEWER))
+        self.assertEqual({name: label.state for name, label in case.labels.items()},
+                         {"FEMUR_LEFT": "pending", "FEMUR_RIGHT": "kept"})
+
+    def test_only_labels_of_the_origins_the_server_queues_are_under_review(self):
+        self.builder.add_scan(1, 1, segmentation={"FEMUR_LEFT": "source", "PATELLA_LEFT": "model:TotalSegmentator@2.4.0"})
+        store, rita, _ = self.open(eligible_origins=["model"])
+        case = store.handout_case(store.next_scan(rita, REVIEWER))
+        self.assertEqual({name: label.state for name, label in case.labels.items()},
+                         {"FEMUR_LEFT": "kept", "PATELLA_LEFT": "pending"})
 
     def test_a_painted_label_the_dataset_does_not_list_is_under_review(self):
-        """Nobody has looked at it: the file paints it, and Subject_info says nothing of it."""
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1}, write_segmentation_file=False)
-        write_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT", "SACRUM"])
+        """Nobody can say where it comes from: the file paints it, and scan.json says nothing of it."""
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT"], painted=["FEMUR_LEFT", "SACRUM"])
         store, rita, _ = self.open()
-        case = store.handout_case(store.next_subject(rita, REVIEWER))
+        case = store.handout_case(store.next_scan(rita, REVIEWER))
         self.assertEqual(case.labels["SACRUM"].state, "pending")
 
     def test_a_listed_label_the_segmentation_does_not_paint_is_removed(self):
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1}, write_segmentation_file=False)
-        write_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT"])
+        self.builder.add_scan(1, 1, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], painted=["FEMUR_LEFT"])
         store, rita, _ = self.open()
-        case = store.handout_case(store.next_subject(rita, REVIEWER))
+        case = store.handout_case(store.next_scan(rita, REVIEWER))
         self.assertEqual(case.labels["FEMUR_RIGHT"].state, "removed")
 
     def test_a_subject_without_a_segmentation_goes_straight_to_the_editors(self):
-        self.builder.add_subject(1, 1, segmentation=None)
-        store, rita, eddie = self.open(include_subjects_without_segmentation=True)
+        self.builder.add_scan(1, 1, segmentation=None)
+        store, rita, eddie = self.open(include_scans_without_segmentation=True)
         with self.assertRaises(QCError):
-            store.next_subject(rita, REVIEWER)
-        assignment = store.next_subject(eddie, EDITOR)
+            store.next_scan(rita, REVIEWER)
+        assignment = store.next_scan(eddie, EDITOR)
         self.assertEqual(store.handout_case(assignment).stage, "edit")
 
 
@@ -161,7 +174,7 @@ class ReviewVerdictTests(WorkflowTestCase):
 
     def test_a_subject_rejected_as_a_whole_goes_to_the_administrator(self):
         """No editor sees it: no correction of its segmentation would help."""
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         outcome = self.store.submit(
             assignment.assignment_id, self.rita, False, None, comment="hip implant", rejected_labels=["FEMUR_RIGHT"]
         )
@@ -171,12 +184,12 @@ class ReviewVerdictTests(WorkflowTestCase):
         self.assertEqual(self.case().requests, [])
         event = self.case().events[-1]
         self.assertEqual((event.action, event.by, event.comment), ("reject", "rita", "hip implant"))
-        self.assertEqual(self.store.stats().rejected_subjects, 1)
+        self.assertEqual(self.store.stats().rejected_scans, 1)
 
     def test_a_subject_rejected_after_a_correction_keeps_its_labels(self):
         self.reject_right_femur()
         self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         self.store.submit(assignment.assignment_id, self.rita, False, None, comment="cropped at the knee")
         self.assertEqual(self.case().stage, "rejected")
         self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "pending"})
@@ -192,14 +205,13 @@ class ReviewVerdictTests(WorkflowTestCase):
         self.assertEqual(self.case().events[-1].comment, "the tibia is in the scan")
 
     def test_a_listed_bone_that_is_not_painted_can_be_reported_missing(self):
-        """Subject_info says the dataset has it; the file does not paint it."""
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1, "SACRUM": 1}, write_segmentation_file=False)
-        write_mask(self.builder.segmentation_file(1, 2), ["FEMUR_LEFT"])
+        """scan.json says the scan has it; the file does not paint it."""
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT", "SACRUM"], painted=["FEMUR_LEFT"])
         store = self.make_store()
-        self.review(store, self.rita)  # subject 1
+        self.review(store, self.rita)  # scan 1
         outcome = self.review(store, self.rita, missing=["SACRUM"])
         self.assertEqual(outcome.stage, "edit")
-        label = store.case_of("001_000002").labels["SACRUM"]
+        label = store.case_of("ds-0001/sub-000002/scan-01").labels["SACRUM"]
         self.assertEqual((label.state, label.painted), ("rejected", False))
 
     def test_a_label_left_unjudged_keeps_the_subject_waiting_for_a_reviewer(self):
@@ -207,25 +219,25 @@ class ReviewVerdictTests(WorkflowTestCase):
         self.assertEqual(outcome.stage, "review")
         self.assertEqual(self.states(), {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "pending"})
         bob = self.store.create_user("bob", roles=[REVIEWER])[0]
-        self.assertEqual(self.store.next_subject(bob, REVIEWER).subject_key, KEY)
+        self.assertEqual(self.store.next_scan(bob, REVIEWER).scan_key, KEY)
 
     def test_a_label_the_dataset_has_as_reviewed_can_still_be_rejected(self):
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"], reviewed=["FEMUR_LEFT"])
         store = self.make_store()
-        self.review(store, self.rita)  # subject 1 first
+        self.review(store, self.rita)  # scan 1 first
         outcome = self.review(store, self.rita, rejected=["FEMUR_LEFT"])
         self.assertEqual(outcome.stage, "edit")
-        self.assertEqual(store.case_of("001_000002").labels["FEMUR_LEFT"].state, "rejected")
+        self.assertEqual(store.case_of("ds-0001/sub-000002/scan-01").labels["FEMUR_LEFT"].state, "rejected")
 
     def test_a_subject_waiting_for_an_editor_is_not_handed_to_a_reviewer(self):
         self.reject_right_femur()
         bob = self.store.create_user("bob", roles=[REVIEWER])[0]
         with self.assertRaises(QCError) as ctx:
-            self.store.next_subject(bob, REVIEWER)
+            self.store.next_scan(bob, REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)
 
     def assert_refused(self, fragment: str, **verdict) -> None:
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         with self.assertRaises(QCError) as ctx:
             self.store.submit(assignment.assignment_id, self.rita, True, None, use_stored_segmentation=True, **verdict)
         self.assertEqual(ctx.exception.status_code, 400)
@@ -256,7 +268,7 @@ class EditTests(WorkflowTestCase):
         self.reject_right_femur()
 
     def test_the_editor_is_handed_the_rejected_subject_and_told_why(self):
-        assignment = self.store.next_subject(self.eddie, EDITOR)
+        assignment = self.store.next_scan(self.eddie, EDITOR)
         case = self.store.handout_case(assignment)
         self.assertEqual(case.stage, "edit")
         label = case.labels["FEMUR_RIGHT"]
@@ -274,12 +286,12 @@ class EditTests(WorkflowTestCase):
 
     def test_the_next_reviewer_sees_the_correction(self):
         self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])
-        path = self.store.current_segmentation_path(1, 1)
-        self.assertEqual(path, self.state_dir / "staged" / "Dataset_001" / f"{KEY}.seg.nrrd")
+        path = self.store.current_segmentation_path(KEY)
+        self.assertEqual(path, self.state_dir / "staged" / KEY / "segmentation.seg.nrrd")
         self.assertEqual(labels_in_mask(path), {"FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"})
-        assignment = self.store.next_subject(self.rita, REVIEWER)
-        self.assertEqual(assignment.subject_key, KEY)
-        self.assertEqual([s.label for s in self.store.segment_table(1, 1)], ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])
+        assignment = self.store.next_scan(self.rita, REVIEWER)
+        self.assertEqual(assignment.scan_key, KEY)
+        self.assertEqual([s.label for s in self.store.segment_table(KEY)], ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])
 
     def test_a_correction_that_spills_into_an_accepted_label_takes_its_acceptance_away(self):
         self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_LEFT", "FEMUR_RIGHT"])
@@ -294,30 +306,30 @@ class EditTests(WorkflowTestCase):
     def test_an_editor_is_never_handed_a_subject_waiting_for_a_review(self):
         self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
         with self.assertRaises(QCError) as ctx:
-            self.store.next_subject(self.eddie, EDITOR)
+            self.store.next_scan(self.eddie, EDITOR)
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_nobody_reviews_their_own_correction(self):
         alice = self.store.create_user("alice")[0]
         self.edit(self.store, alice, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
         with self.assertRaises(QCError) as ctx:
-            self.store.next_subject(alice, REVIEWER)
+            self.store.next_scan(alice, REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)
-        self.assertEqual(self.store.next_subject(self.rita, REVIEWER).subject_key, KEY)
+        self.assertEqual(self.store.next_scan(self.rita, REVIEWER).scan_key, KEY)
 
     def test_an_editor_who_cannot_correct_it_sends_it_to_the_administrator(self):
-        assignment = self.store.next_subject(self.eddie, EDITOR)
+        assignment = self.store.next_scan(self.eddie, EDITOR)
         outcome = self.store.submit(assignment.assignment_id, self.eddie, False, None, comment="the image is cropped")
         self.assertEqual(outcome.stage, "escalated")
         self.assertIn("administrator", outcome.message)
         for user, role in ((self.eddie, EDITOR), (self.rita, REVIEWER)):
             with self.assertRaises(QCError):
-                self.store.next_subject(user, role)
+                self.store.next_scan(user, role)
 
     def test_an_editor_not_sent_the_segmentation_is_not_handed_one_to_correct(self):
         ian = self.store.create_user("ian", roles=[EDITOR], data_access="image")[0]
         with self.assertRaises(QCError) as ctx:
-            self.store.next_subject(ian, EDITOR)
+            self.store.next_scan(ian, EDITOR)
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_an_upload_the_server_cannot_compare_counts_as_changing_everything(self):
@@ -352,46 +364,46 @@ class EditsNeedNoReviewTests(WorkflowTestCase):
 
     def test_a_label_nobody_reviewed_is_accepted_on_the_editors_word(self):
         """Nobody else has given it a verdict, so the editor's is the one it gets."""
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         store = self.make_store(edits_need_review=False)
-        # rita judged subject 1 in setUp; on subject 2 she only reports a missing bone.
+        # rita judged scan 1 in setUp; on scan 2 she only reports a missing bone.
         self.review(store, self.rita, accepted=["FEMUR_LEFT"], missing=["TIBIA_LEFT"])
-        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # subject 1
-        outcome = self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])  # subject 2
+        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # scan 1
+        outcome = self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])  # scan 2
         self.assertEqual(outcome.stage, "approval")
         self.assertEqual(outcome.accepted_labels, ["FEMUR_RIGHT", "TIBIA_LEFT"])
         self.assertEqual(outcome.edited_labels, ["TIBIA_LEFT"])
-        labels = store.case_of("001_000002").labels
+        labels = store.case_of("ds-0001/sub-000002/scan-01").labels
         self.assertEqual({name: (label.state, label.by) for name, label in labels.items()},
                          {"FEMUR_LEFT": ("accepted", "rita"), "FEMUR_RIGHT": ("accepted", "eddie"),
                           "TIBIA_LEFT": ("accepted", "eddie")})
         self.assertIsNone(labels["FEMUR_RIGHT"].edited_by, "eddie did not change it")
 
     def test_a_rejected_subject_the_administrator_sends_to_an_editor_goes_to_approval(self):
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         store = self.make_store(edits_need_review=False)
-        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # subject 1
-        assignment = store.next_subject(self.rita, REVIEWER)
+        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # scan 1
+        assignment = store.next_scan(self.rita, REVIEWER)
         store.submit(assignment.assignment_id, self.rita, False, None, comment="leg cropped")
-        store.return_case("001_000002", "edit", comment="fix it anyway")
+        store.return_case("ds-0001/sub-000002/scan-01", "edit", comment="fix it anyway")
         outcome = self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_LEFT"])
         self.assertEqual(outcome.stage, "approval")
-        states = {name: label.state for name, label in store.case_of("001_000002").labels.items()}
+        states = {name: label.state for name, label in store.case_of("ds-0001/sub-000002/scan-01").labels.items()}
         self.assertEqual(states, {"FEMUR_LEFT": "accepted", "FEMUR_RIGHT": "accepted"})
 
     def test_a_label_nobody_reviewed_that_the_editor_does_not_vouch_for_waits_for_a_reviewer(self):
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT", "FEMUR_RIGHT"])
         store = self.make_store(edits_need_review=False)
-        self.review(store, self.rita, accepted=["FEMUR_LEFT"], missing=["TIBIA_LEFT"])  # subject 2
-        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # subject 1
+        self.review(store, self.rita, accepted=["FEMUR_LEFT"], missing=["TIBIA_LEFT"])  # scan 2
+        self.edit(store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])  # scan 1
         outcome = self.edit(
             store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"], confirmed=["FEMUR_LEFT", "TIBIA_LEFT"]
         )
         self.assertEqual(outcome.stage, "review")
-        self.assertEqual(store.case_of("001_000002").labels["FEMUR_RIGHT"].state, "pending")
+        self.assertEqual(store.case_of("ds-0001/sub-000002/scan-01").labels["FEMUR_RIGHT"].state, "pending")
 
     def test_a_removal_waiting_for_a_reviewer_is_final_once_an_editor_leaves_the_label_out(self):
-        """The administrator sent the subject to the reviewers, then to the editors."""
+        """The administrator sent the scan to the reviewers, then to the editors."""
         self.edit(self.store, self.eddie, ["FEMUR_LEFT"])
         self.store.return_case(KEY, "review")
         self.store.return_case(KEY, "edit")
@@ -408,7 +420,7 @@ class MissingBoneTests(WorkflowTestCase):
         self.review(self.store, self.rita, missing=["TIBIA_LEFT"])
 
     def test_an_editor_adds_the_bone_and_a_reviewer_checks_it(self):
-        assignment = self.store.next_subject(self.eddie, EDITOR)
+        assignment = self.store.next_scan(self.eddie, EDITOR)
         label = self.store.handout_case(assignment).labels["TIBIA_LEFT"]
         self.assertEqual((label.state, label.painted), ("rejected", False))
         self.store.submit(assignment.assignment_id, self.eddie, True, self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"]))
@@ -468,29 +480,29 @@ class RemovalTests(WorkflowTestCase):
 
 
 class LeasesPerRoleTests(WorkflowTestCase):
-    """A user with both roles works in both clients, a subject at a time in each."""
+    """A user with both roles works in both clients, a scan at a time in each."""
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
+        self.builder.add_scan(1, 2, segmentation=["FEMUR_LEFT"])
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
-        self.reject_right_femur()  # subject 1 waits for an editor, subject 2 for a reviewer
+        self.reject_right_femur()  # scan 1 waits for an editor, scan 2 for a reviewer
 
     def test_one_subject_to_review_and_one_to_edit_at_the_same_time(self):
-        to_review = self.store.next_subject(self.alice, REVIEWER)
-        to_edit = self.store.next_subject(self.alice, EDITOR)
-        self.assertEqual((to_review.subject_key, to_edit.subject_key), ("001_000002", KEY))
+        to_review = self.store.next_scan(self.alice, REVIEWER)
+        to_edit = self.store.next_scan(self.alice, EDITOR)
+        self.assertEqual((to_review.scan_key, to_edit.scan_key), ("ds-0001/sub-000002/scan-01", KEY))
         self.assertEqual((to_review.role, to_edit.role), (REVIEWER, EDITOR))
 
     def test_each_client_lists_what_it_was_handed(self):
-        to_review = self.store.next_subject(self.alice, REVIEWER)
-        to_edit = self.store.next_subject(self.alice, EDITOR)
+        to_review = self.store.next_scan(self.alice, REVIEWER)
+        to_edit = self.store.next_scan(self.alice, EDITOR)
         self.assertEqual([a.assignment_id for a in self.store.open_assignments_of("alice", REVIEWER)], [to_review.assignment_id])
         self.assertEqual([a.assignment_id for a in self.store.open_assignments_of("alice", EDITOR)], [to_edit.assignment_id])
 
     def test_a_subject_is_submitted_in_the_role_it_was_handed_out_in(self):
-        to_edit = self.store.next_subject(self.alice, EDITOR)
+        to_edit = self.store.next_scan(self.alice, EDITOR)
         with self.assertRaises(QCError) as ctx:
             self.store.submit(to_edit.assignment_id, self.alice, True, None, use_stored_segmentation=True, role=REVIEWER)
         self.assertEqual(ctx.exception.status_code, 409)
@@ -498,13 +510,13 @@ class LeasesPerRoleTests(WorkflowTestCase):
         with self.assertRaises(QCError) as ctx:
             self.store.submit(to_edit.assignment_id, self.alice, True, None, use_stored_segmentation=True)
         self.assertEqual(ctx.exception.status_code, 409, "an editor uploads, even to agree")
-        to_review = self.store.next_subject(self.alice, REVIEWER)
+        to_review = self.store.next_scan(self.alice, REVIEWER)
         with self.assertRaises(QCError) as ctx:
             self.store.submit(to_review.assignment_id, self.alice, True, self.upload_file(["FEMUR_LEFT"]))
         self.assertEqual(ctx.exception.status_code, 409, "a review judges the segmentation as it is")
 
     def test_a_role_taken_away_stops_the_verdict_in_it(self):
-        to_edit = self.store.next_subject(self.alice, EDITOR)
+        to_edit = self.store.next_scan(self.alice, EDITOR)
         self.store.update_user("alice", roles=[REVIEWER])
         alice = self.store._users["alice"]
         with self.assertRaises(QCError) as ctx:
@@ -513,23 +525,23 @@ class LeasesPerRoleTests(WorkflowTestCase):
 
 
 class LateVerdictTests(WorkflowTestCase):
-    """A lease that ran out: the verdict counts only while the subject is still the user's."""
+    """A lease that ran out: the verdict counts only while the scan is still the user's."""
 
     def expire(self, assignment) -> None:
         assignment.expires_at = "2000-01-01T00:00:00Z"
 
     def test_a_late_verdict_on_a_subject_nobody_else_took_counts(self):
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         self.expire(assignment)
         self.store.stats()  # the lease expires
         outcome = self.store.submit(assignment.assignment_id, self.rita, True, None, use_stored_segmentation=True)
         self.assertEqual(outcome.stage, "approval")
 
     def test_a_late_verdict_on_a_subject_handed_to_someone_else_is_refused(self):
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         self.expire(assignment)
         bob = self.store.create_user("bob", roles=[REVIEWER])[0]
-        self.assertEqual(self.store.next_subject(bob, REVIEWER).subject_key, KEY)
+        self.assertEqual(self.store.next_scan(bob, REVIEWER).scan_key, KEY)
         with self.assertRaises(QCError) as ctx:
             self.store.submit(assignment.assignment_id, self.rita, True, None, use_stored_segmentation=True)
         self.assertEqual(ctx.exception.status_code, 409)
@@ -537,8 +549,8 @@ class LateVerdictTests(WorkflowTestCase):
         self.assertIsNone(self.case())
 
     def test_a_verdict_on_a_subject_that_moved_on_is_refused(self):
-        """The administrator took the subject back and someone else judged it meanwhile."""
-        assignment = self.store.next_subject(self.rita, REVIEWER)
+        """The administrator took the scan back and someone else judged it meanwhile."""
+        assignment = self.store.next_scan(self.rita, REVIEWER)
         self.store.release_assignment(assignment.assignment_id)
         bob = self.store.create_user("bob", roles=[REVIEWER])[0]
         self.review(self.store, bob, rejected=["FEMUR_LEFT"])

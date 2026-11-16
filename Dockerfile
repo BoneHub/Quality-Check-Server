@@ -2,15 +2,15 @@
 # (The check trips over the name BONEHUB_QC_CREDENTIALS_DIR, which holds a folder path,
 # not a secret. The keys themselves never pass through ARG or ENV in this file.)
 #
-# BoneHub Dataset Quality Check server. Run it with docker compose (see docker-compose.yml
-# and the README); Docker is the only supported way to run the server.
+# BoneHub Quality Check server. Run it with docker compose (see docker-compose.yml and the
+# README); Docker is the only supported way to run the server.
 #
-# The image carries only the data schema from BoneHub-Dataset, with its [io] extra
+# The image carries only the BoneHub format from BoneHub-Format, with its [io] extra
 # (numpy, SimpleITK) for reading and writing .seg.nrrd segmentations, plus FastAPI.
-# Nothing from the conversion or segmentation stack is installed.
+# Nothing from the converter stack is installed.
 #
 # Two mounts:
-#   /data                 the dataset, read-write. The server keeps its non-secret state
+#   /data                 the database, read-write. The server keeps its non-secret state
 #                         in /data/.bonehub_qc/<server id>/. A reliability study server
 #                         (BONEHUB_QC_MODE=study) only reads it, and can mount it read-only.
 #   /var/lib/bonehub-qc   the server's credentials: its id, private key, admin key and
@@ -19,10 +19,10 @@
 
 FROM python:3.11-slim
 
-# git is needed only to resolve the `bonehub-dataset @ git+https://...` dependency.
-# tzdata stays, for the TZ that docker-compose.yml sets; without it TZ silently means UTC.
+# tzdata, for the TZ that docker-compose.yml sets; without it TZ silently means UTC. No git:
+# bonehub-format is installed from its repository's source archive (see pyproject.toml).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git tzdata \
+    && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -30,9 +30,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY qc_server ./qc_server
 
-RUN pip install --no-cache-dir . \
-    && apt-get purge -y git \
-    && apt-get autoremove -y
+RUN pip install --no-cache-dir .
 
 # Readable by the server alone.
 RUN mkdir -p /var/lib/bonehub-qc && chmod 700 /var/lib/bonehub-qc

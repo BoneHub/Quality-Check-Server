@@ -158,7 +158,7 @@
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
   .card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
   .card-head h2 { flex: 1; }
-  .subject-key { font-size: 18px; font-weight: 600; }
+  .scan-key { font-size: 18px; font-weight: 600; }
   .facts { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
   .facts div { margin-top: 2px; }
   .lease { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
@@ -326,7 +326,7 @@
             <h1 id="emptyTitle">Signing in…</h1>
             <p id="emptyText"></p>
             <div id="emptyMessage"></div>
-            <p style="margin-top:16px"><button class="primary" id="nextBtn" hidden>Get next subject</button></p>          </div>
+            <p style="margin-top:16px"><button class="primary" id="nextBtn" hidden>Get next scan</button></p>          </div>
         </div>
 
         <div class="overlay" id="loadingState" hidden>
@@ -347,15 +347,15 @@
     </section>
 
     <aside class="sidebar">
-      <section class="card" id="subjectCard" hidden>
-        <div class="card-head"><h2>Subject</h2></div>
-        <div class="subject-key mono" id="subjectKey"></div>
-        <div class="facts" id="subjectFacts"></div>
+      <section class="card" id="scanCard" hidden>
+        <div class="card-head"><h2>Scan</h2></div>
+        <div class="scan-key mono" id="scanKey"></div>
+        <div class="facts" id="scanFacts"></div>
         <div class="lease" id="leaseBox" hidden>
           <span id="leaseText"></span>
-          <button class="small" id="extendBtn" title="Keep this subject for another lease period">Extend</button>
+          <button class="small" id="extendBtn" title="Keep this scan for another lease period">Extend</button>
         </div>
-        <div id="subjectNotes"></div>
+        <div id="scanNotes"></div>
         <ul class="history" id="historyList" hidden></ul>
       </section>
 
@@ -385,17 +385,17 @@
         <div class="actions">
           <button class="primary" id="confirmBtn">Submit verdict</button>
           <button class="danger" id="rejectBtn"
-                  title="Reject the subject as a whole when no correction of its segmentation would help, such as for a poor or cropped image or an implant">Reject subject</button>
-          <button id="releaseBtn" title="Give the subject back without a verdict">Release</button>
+                  title="Reject the scan as a whole when no correction of its segmentation would help, such as for a poor or cropped image or an implant">Reject scan</button>
+          <button id="releaseBtn" title="Give the scan back without a verdict">Release</button>
         </div>
         <p class="muted qc-only" style="font-size:12px;margin:8px 0 0">
-          Your verdict waits on the server. Nothing is written into the dataset until the administrator approves the subject.
+          Your verdict waits on the server. Nothing is written into the dataset until the administrator approves the scan.
         </p>
         <p class="muted study-only" style="font-size:12px;margin:8px 0 0">
           This is a reading for a reliability study: judge it as you would in the quality check. Your verdict changes
           nothing in the dataset.
         </p>
-        <label class="check"><input type="checkbox" id="autoNext"> Open the next subject after submitting</label>
+        <label class="check"><input type="checkbox" id="autoNext"> Open the next scan after submitting</label>
         <div id="verdictMessage"></div>
       </section>
     </aside>

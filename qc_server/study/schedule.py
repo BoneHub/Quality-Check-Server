@@ -1,15 +1,15 @@
-"""Which subjects a study is about, the codes that stand for its raters, and each rater's list.
+"""Which scans a study is about, the codes that stand for its raters, and each rater's list.
 
 Everything random here is drawn from the study's seed, each draw from a stream of its own --
-the pick of subjects, the codes, and each rater's order -- so the same settings on the same
+the pick of scans, the codes, and each rater's order -- so the same settings on the same
 dataset always give the same study, and changing one rater does not reshuffle the others.
 
-A rater reads the study's subjects in rounds: in each round every subject once, in a random
-order. Their list is the rounds one after another. A subject read at the end of one round
+A rater reads the study's scans in rounds: in each round every scan once, in a random
+order. Their list is the rounds one after another. A scan read at the end of one round
 could come straight back at the start of the next, and the rater would remember their first
 verdict. So each round after the first keeps a *gap*: between a rater's two readings of a
-subject there are at least that many readings of other subjects. The gap can be at most the
-number of subjects minus one; with that, every round repeats the order of the first.
+scan there are at least that many readings of other scans. The gap can be at most the
+number of scans minus one; with that, every round repeats the order of the first.
 """
 
 from __future__ import annotations
@@ -18,38 +18,44 @@ import random
 import re
 from collections.abc import Callable, Iterable
 
-from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
+from bonehub_format import layout
 
-_SUBJECT_KEY = re.compile(r"^\s*(\d+)\s*[_/-]\s*(\d+)\s*$")
-
-
-def normalized_subject_key(text: str) -> str:
-    """A subject key as the dataset writes it, '001_000012', from '001_000012' or '1_12'."""
-    match = _SUBJECT_KEY.match(str(text))
-    if match is None:
-        raise ValueError(f"'{text}' is not a subject id such as 001_000012 (dataset 1, subject 12)")
-    dataset_id, subject_id = (int(part) for part in match.groups())
-    return f"{str(dataset_id).zfill(DATASET_ZFILL)}_{str(subject_id).zfill(SUBJECT_ZFILL)}"
+#: A scan as the administrator may type it: its path, ds-0027/sub-000012/scan-01, or its three
+#: ids, 27/12/1, the prefixes and leading zeros left out at will, '_' for '/' if they like.
+_SCAN_KEY = re.compile(r"^\s*(?:ds-)?(\d+)\s*[/_]\s*(?:sub-)?(\d+)\s*[/_]\s*(?:scan-)?(\d+)\s*$")
 
 
-def subject_ids(subject_key: str) -> tuple[int, int]:
-    """``(dataset_id, subject_id)`` of a subject key."""
-    dataset_id, subject_id = normalized_subject_key(subject_key).split("_")
-    return int(dataset_id), int(subject_id)
+def normalized_scan_key(text: str) -> str:
+    """A scan key as the database names the scan, 'ds-0027/sub-000012/scan-01', from that or
+    from '27/12/1'."""
+    match = _SCAN_KEY.match(str(text))
+    try:
+        if match is None:
+            raise ValueError
+        return layout.scan_key(*(int(part) for part in match.groups()))
+    except ValueError:
+        raise ValueError(
+            f"'{text}' is not a scan such as ds-0027/sub-000012/scan-01, or 27/12/1 (dataset 27, subject 12, scan 1)"
+        ) from None
 
 
-def pick_subjects(
+def scan_ids(scan_key: str) -> tuple[int, int, int]:
+    """``(dataset_id, subject_id, scan_id)`` of a scan key."""
+    return layout.parse_scan_key(normalized_scan_key(scan_key))
+
+
+def pick_scans(
     candidates: Iterable[str], count: int, seed: int, problem_of: Callable[[str], str | None]
 ) -> tuple[list[str], list[tuple[str, str]]]:
-    """A random pick of ``count`` subjects among ``candidates``, each of them fit for the study.
+    """A random pick of ``count`` scans among ``candidates``, each of them fit for the study.
 
     The candidates are shuffled with the seed and taken in that order; one that
     ``problem_of`` finds a problem with is skipped, with the problem. Returns the picked
-    subjects, sorted, and the skipped ones. Fewer than ``count`` are picked when the
+    scans, sorted, and the skipped ones. Fewer than ``count`` are picked when the
     candidates run out.
     """
     order = sorted(set(candidates))
-    random.Random(f"{seed}:subjects").shuffle(order)
+    random.Random(f"{seed}:scans").shuffle(order)
     picked: list[str] = []
     skipped: list[tuple[str, str]] = []
     for key in order:
@@ -81,27 +87,27 @@ def rater_codes(names: Iterable[str], seed: int) -> dict[str, str]:
     return {name: code_of(index) for index, name in enumerate(order)}
 
 
-def default_gap(n_subjects: int) -> int:
-    """Half the number of study subjects."""
-    return n_subjects // 2
+def default_gap(n_scans: int) -> int:
+    """Half the number of study scans."""
+    return n_scans // 2
 
 
-def gap_problem(gap: int, n_subjects: int, readings: int) -> str | None:
+def gap_problem(gap: int, n_scans: int, readings: int) -> str | None:
     """Why a rater's list cannot keep this gap, or None when it can."""
-    if readings < 2 or gap <= n_subjects - 1:
+    if readings < 2 or gap <= n_scans - 1:
         return None
     return (
-        f"A minimum gap of {gap} cannot be kept with {n_subjects} study subject(s): there are only "
-        f"{n_subjects - 1} other subject(s) to put between two readings of one. Use a gap of at most "
-        f"{n_subjects - 1}, or more subjects."
+        f"A minimum gap of {gap} cannot be kept with {n_scans} study scan(s): there are only "
+        f"{n_scans - 1} other scan(s) to put between two readings of one. Use a gap of at most "
+        f"{n_scans - 1}, or more scans."
     )
 
 
 def reading_orders(
-    subject_keys: Iterable[str], codes: dict[str, str], readings: int, gap: int, seed: int
+    scan_keys: Iterable[str], codes: dict[str, str], readings: int, gap: int, seed: int
 ) -> dict[str, list[tuple[str, int]]]:
-    """Each rater's list, by name: ``(subject key, reading number of that subject)`` in order."""
-    keys = sorted(set(subject_keys))
+    """Each rater's list, by name: ``(scan key, reading number of that scan)`` in order."""
+    keys = sorted(set(scan_keys))
     return {
         name: reading_order(keys, readings, gap, random.Random(f"{seed}:order:{code}"))
         for name, code in sorted(codes.items())
@@ -110,7 +116,7 @@ def reading_orders(
 
 def reading_order(keys: list[str], readings: int, gap: int, rng: random.Random) -> list[tuple[str, int]]:
     """``readings`` rounds of ``keys``, each in a random order, keeping ``gap`` between the
-    readings of a subject in consecutive rounds."""
+    readings of a scan in consecutive rounds."""
     problem = gap_problem(gap, len(keys), readings)
     if problem:
         raise ValueError(problem)
@@ -131,10 +137,10 @@ def _next_round(keys: list[str], previous: dict[str, int], gap: int, rng: random
     """A random order of ``keys`` that puts each at least ``gap`` readings after its place in
     the previous round.
 
-    A subject at position p of the previous round (from 0) has n - 1 - p readings after it
+    A scan at position p of the previous round (from 0) has n - 1 - p readings after it
     there, so it can come no earlier than gap - (n - 1 - p) here. Positions are filled from the
-    last: each with a subject drawn at random, except where a subject can go no later, which
-    then takes it. Two subjects never share that last position, since it differs with p, so
+    last: each with a scan drawn at random, except where a scan can go no later, which
+    then takes it. Two scans never share that last position, since it differs with p, so
     this always succeeds.
     """
     n = len(keys)

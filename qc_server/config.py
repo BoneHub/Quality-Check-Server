@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from bonehub_data_schema import VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION
+
+from . import __version__ as SERVER_VERSION
 
 ENV_PREFIX = "BONEHUB_QC_"
 DEFAULT_STATE_DIR_NAME = ".bonehub_qc"
@@ -36,6 +39,20 @@ CONFIG_FILE_NAME = "config.json"
 #: Settings an older server saved in ``config.json`` that no longer exist. They are dropped on
 #: loading, so a server updated in place still starts.
 RETIRED_FIELDS = ("max_concurrent_assignments_per_user",)
+
+#: ``BONEHUB_QC_*`` variables of servers written for BoneHub data schema 0.3, with what took
+#: their place. One still set stops the server, rather than being silently ignored.
+RETIRED_ENV = {
+    "ELIGIBLE_LABEL_VALUES": (
+        "the label statuses are gone from the BoneHub format. Use ELIGIBLE_REVIEW_STATES instead: "
+        "not_reviewed for status 1, reviewed for status 2"
+    ),
+    "INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION": "it is now INCLUDE_SCANS_WITHOUT_SEGMENTATION",
+    "MARK_REMOVED_LABELS_ABSENT": (
+        "a label no longer in an approved segmentation is now always taken out of scan.json, which must "
+        "list exactly the labels of the segmentation"
+    ),
+}
 
 #: What the server is for, from ``BONEHUB_QC_MODE``: the quality check of the dataset, or a
 #: reliability study of the reviewers, which runs on a server of its own.
@@ -47,42 +64,81 @@ MODES = (QC_MODE, STUDY_MODE)
 #: place of ``<dataset_root>/.bonehub_qc``: a study server leaves the dataset alone.
 STUDY_STATE_DIR_NAME = "state"
 
-#: The schema whose label statuses and segmentation format this server implements. The
-#: schema is installed from its repository's main branch, so a newer one must stop the
-#: server rather than have its statuses read with this version's meaning.
-WRITTEN_FOR_SCHEMA = "0.3"
-if SCHEMA_VERSION.split(".")[:2] != WRITTEN_FOR_SCHEMA.split("."):
+#: The major version of the BoneHub format whose layout, scan.json and segmentation format this
+#: server implements: the server's own major version, so that server 1.x reads format 1.x. The
+#: format is installed from its repository's main branch; a minor version only adds what older
+#: datasets still satisfy, but a new major version must stop the server rather than have its
+#: datasets read with this version's meaning -- until a server of that major version is released.
+WRITTEN_FOR_FORMAT = SERVER_VERSION.split(".")[0]
+if SCHEMA_VERSION.split(".")[0] != WRITTEN_FOR_FORMAT:
     raise ImportError(
-        f"bonehub_data_schema {SCHEMA_VERSION} is installed, but this server is written for schema "
-        f"{WRITTEN_FOR_SCHEMA}.x, whose label statuses and segmentation format may differ. Install the "
-        "matching schema, or update the server."
+        f"bonehub_format {SCHEMA_VERSION} is installed, but this server, version {SERVER_VERSION}, is written "
+        f"for version {WRITTEN_FOR_FORMAT}.x of the BoneHub format, whose layout and scan.json may differ. "
+        f"Install bonehub_format {WRITTEN_FOR_FORMAT}.x, or a server of version {SCHEMA_VERSION.split('.')[0]}.x."
     )
 
-#: Label statuses in ``Subject_info_XXX.json``, as ``bonehub_data_schema`` defines them.
-STATUS_NOT_AVAILABLE = 0
-STATUS_NOT_REVIEWED = 1
-STATUS_REVIEWED = 2
+#: Whether a label has been reviewed, as the queue sees it. The BoneHub format does not record
+#: reviews: a label is reviewed when a quality-check server on the database approved a reviewer's
+#: (or a vouching editor's) acceptance of it, and the scan's segmentation is still the one approved.
+NOT_REVIEWED = "not_reviewed"
+REVIEWED = "reviewed"
+REVIEW_STATES: dict[str, str] = {
+    NOT_REVIEWED: "no server on this database has reviewed it",
+    REVIEWED: "a server on this database has reviewed it, and its segmentation is unchanged since",
+}
 
-#: Statuses a label can have while it has a segmentation to look at.
-REVIEWABLE_STATUSES = {STATUS_NOT_REVIEWED, STATUS_REVIEWED}
+#: The kinds of origin a label has in scan.json (see ``bonehub_format.check_origin``), and what
+#: each means.
+ORIGIN_KINDS: dict[str, str] = {
+    "source": "came with the source dataset",
+    "manual": "drawn by hand for this dataset",
+    "model": "predicted by a model (model:<name>@<version>)",
+    "derived": "computed from another file of the same scan (derived:<tool>@<version>)",
+}
+
+#: The origin an approval gives a label an editor drew or changed.
+EDITED_ORIGIN = "manual"
+
+#: An entry of ``eligible_origins``: a kind of origin, a model or tool by name, or a full origin.
+_ORIGIN_PATTERN = re.compile(r"source|manual|(model|derived)(:[^\s@:]+(@[^\s@]+)?)?")
+
+
+def origin_matches(origin: str | None, patterns: list[str] | None) -> bool:
+    """Whether a label's origin is one of ``patterns`` (None: any origin). ``model`` matches every
+    ``model:<name>@<version>``, ``model:TotalSegmentator`` every version of that model, and a
+    full origin itself. A label scan.json does not list has no origin, and matches only None."""
+    if patterns is None:
+        return True
+    if origin is None:
+        return False
+    return any(origin == p or origin.startswith(f"{p}:") or origin.startswith(f"{p}@") for p in patterns)
 
 
 class QCServerConfig(BaseModel):
-    """Policy that decides which subjects are handed out and what a submission does."""
+    """Policy that decides which scans are handed out and what a submission does."""
 
     # --- queue policy -------------------------------------------------------
-    eligible_label_values: list[int] = Field(
-        default_factory=lambda: [STATUS_NOT_REVIEWED],
+    eligible_review_states: list[Literal["not_reviewed", "reviewed"]] = Field(
+        default_factory=lambda: [NOT_REVIEWED],
         description=(
-            "A subject is queued for quality check when at least one of its segmentation "
-            "labels has one of these statuses. Defaults to [1] = 'available, not reviewed or "
-            "corrected'; add 2 to review already reviewed subjects again."
+            "A scan is queued for quality check when at least one label of its segmentation is in one of "
+            "these review states, and the review takes those labels. 'not_reviewed' (the default): no server "
+            "on this database has reviewed it. 'reviewed': a server has, and the segmentation is unchanged "
+            "since -- a second review."
         ),
     )
-    include_subjects_without_segmentation: bool = Field(
+    eligible_origins: list[str] | None = Field(
+        None,
+        description=(
+            "Queue only the labels with one of these origins in scan.json: 'source', 'manual', 'model', "
+            "'derived', a model or tool by name such as 'model:TotalSegmentator', or a full origin. None "
+            "means every origin."
+        ),
+    )
+    include_scans_without_segmentation: bool = Field(
         False,
         description=(
-            "Also queue subjects that have an image but no segmentation at all, so editors can create one "
+            "Also queue scans that have an image but no segmentation at all, so editors can create one "
             "in 3D Slicer. Reviewers are not handed them."
         ),
     )
@@ -94,17 +150,17 @@ class QCServerConfig(BaseModel):
     # --- assignment policy --------------------------------------------------
     assignment_strategy: Literal["sequential", "random"] = Field(
         "sequential",
-        description="'sequential' hands out the lowest free subject, 'random' picks a free subject at random.",
+        description="'sequential' hands out the lowest free scan, 'random' picks a free scan at random.",
     )
     lease_ttl_seconds: int = Field(
         24 * 3600,
         ge=60,
-        description="How long a user keeps a subject before it returns to the queue.",
+        description="How long a user keeps a scan before it returns to the queue.",
     )
     index_refresh_seconds: int = Field(
         300,
         ge=0,
-        description="How often the subject index is rebuilt from disk. 0 rebuilds on every request.",
+        description="How often the scan index is rebuilt from disk. 0 rebuilds on every request.",
     )
 
     # --- submission policy --------------------------------------------------
@@ -115,20 +171,13 @@ class QCServerConfig(BaseModel):
             "are accepted as they are and wait for the administrator's approval."
         ),
     )
-    mark_removed_labels_absent: bool = Field(
-        True,
-        description=(
-            "When an approved subject's segmentation no longer contains a label that used to be in it, "
-            "set that label to 0 ('not available') instead of leaving it."
-        ),
-    )
     require_geometry_match: bool = Field(
         True,
-        description="Reject a submitted segmentation whose voxel grid does not match the subject's image.",
+        description="Reject a submitted segmentation whose voxel grid does not match the scan's image.",
     )
     keep_segmentation_backups: bool = Field(
         True,
-        description="Copy the dataset's segmentation into this server's folder before an approval overwrites it.",
+        description="Copy the scan's segmentation into this server's folder before an approval overwrites it.",
     )
     max_upload_bytes: int = Field(
         512 * 1024 * 1024,
@@ -138,19 +187,34 @@ class QCServerConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    @field_validator("eligible_label_values")
+    @field_validator("eligible_review_states")
     @classmethod
-    def check_eligible_label_values(cls, values: list[int]) -> list[int]:
+    def check_eligible_review_states(cls, values: list[str]) -> list[str]:
         if not values:
-            raise ValueError("eligible_label_values must not be empty.")
+            raise ValueError(
+                "eligible_review_states must not be empty: "
+                + ", ".join(f"'{state}' ({meaning})" for state, meaning in REVIEW_STATES.items())
+                + "."
+            )
+        return [state for state in REVIEW_STATES if state in values]
+
+    @field_validator("eligible_origins")
+    @classmethod
+    def check_eligible_origins(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        values = sorted({value.strip() for value in values if value.strip()})
+        if not values:
+            raise ValueError("eligible_origins must not be empty; leave it out (None) to queue every origin.")
         for value in values:
-            if value not in REVIEWABLE_STATUSES:
+            if not _ORIGIN_PATTERN.fullmatch(value):
                 raise ValueError(
-                    f"Invalid label status {value}. A subject can be queued on "
-                    + ", ".join(f"{s} ('{VALID_LABEL_VALUES[s]}')" for s in sorted(REVIEWABLE_STATUSES))
-                    + "."
+                    f"'{value}' is not an origin. Use "
+                    + ", ".join(f"'{kind}'" for kind in ORIGIN_KINDS)
+                    + ", a model or tool by name such as 'model:TotalSegmentator', or a full origin such as "
+                    "'model:TotalSegmentator@2.4.0'."
                 )
-        return sorted(set(values))
+        return values
 
     # --- persistence --------------------------------------------------------
     @classmethod
@@ -174,7 +238,18 @@ class QCServerConfig(BaseModel):
 
     @classmethod
     def _env_overrides(cls) -> dict:
-        """Collect ``BONEHUB_QC_<FIELD>`` variables that match a config field."""
+        """Collect ``BONEHUB_QC_<FIELD>`` variables that match a config field. A variable of an
+        earlier version that is still set stops the server, saying what took its place."""
+        retired = [
+            f"{ENV_PREFIX}{name}: {replacement}."
+            for name, replacement in RETIRED_ENV.items()
+            if (os.environ.get(f"{ENV_PREFIX}{name}") or "").strip()
+        ]
+        if retired:
+            raise ValueError(
+                "These settings are set in the environment (.env), but no longer exist. Remove them:\n  "
+                + "\n  ".join(retired)
+            )
         overrides: dict = {}
         for name, field in cls.model_fields.items():
             raw = os.environ.get(f"{ENV_PREFIX}{name.upper()}")
@@ -205,7 +280,7 @@ def resolve_dataset_root() -> Path:
     raw = os.environ.get(f"{ENV_PREFIX}DATASET_ROOT")
     if not raw:
         raise RuntimeError(
-            f"{ENV_PREFIX}DATASET_ROOT is not set. Point it at a folder in BoneHub data structure format."
+            f"{ENV_PREFIX}DATASET_ROOT is not set. Point it at a database in the BoneHub format."
         )
     return Path(raw)
 

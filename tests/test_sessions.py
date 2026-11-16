@@ -16,7 +16,7 @@ import os
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from bonehub_data_schema import __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION
 from qc_server import auth
 from qc_server.app import create_app
 from qc_server.config import ENV_PREFIX
@@ -54,7 +54,7 @@ class CredentialsOffTheShareTests(QCTestCase):
         self.edit(store, alice, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
         store.create_user("bob")
         self.review(store, store._users["bob"])
-        store.approve("001_000001")
+        store.approve("ds-0001/sub-000001/scan-01")
 
         on_share = {path.name for path in self.dataset_root.rglob("*")}
         for name in SECRET_FILE_NAMES:
@@ -93,7 +93,7 @@ class ServerSessionTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=3)
+        self.default_dataset(n_scans=3)
         self.first = self.make_store(lease_ttl_seconds=3600)
         second_credentials = self.make_credentials_dir("second_volume", "qc_second_server")
         self.second = self.make_store(credentials_dir=second_credentials, lease_ttl_seconds=600)
@@ -103,8 +103,8 @@ class ServerSessionTests(QCTestCase):
     def test_each_server_keeps_its_state_in_its_own_folder(self):
         self.assertEqual(self.first.state_dir.parent, self.second.state_dir.parent)
         self.assertNotEqual(self.first.state_dir, self.second.state_dir)
-        self.first.next_subject(self.alice, REVIEWER)
-        self.second.next_subject(self.bob, REVIEWER)
+        self.first.next_scan(self.alice, REVIEWER)
+        self.second.next_scan(self.bob, REVIEWER)
 
         def stored(store, name):
             return json.loads((store.state_dir / name).read_text(encoding="utf-8"))
@@ -124,52 +124,103 @@ class ServerSessionTests(QCTestCase):
             self.first.authenticate(bob_key)
 
     def test_a_subject_out_on_one_server_is_not_handed_out_by_the_other(self):
-        on_first = self.first.next_subject(self.alice, REVIEWER)
-        on_second = self.second.next_subject(self.bob, REVIEWER)
-        self.assertNotEqual(on_first.subject_key, on_second.subject_key)
+        on_first = self.first.next_scan(self.alice, REVIEWER)
+        on_second = self.second.next_scan(self.bob, REVIEWER)
+        self.assertNotEqual(on_first.scan_key, on_second.scan_key)
 
         stats = self.second.stats()
         self.assertEqual((stats.assigned, stats.assigned_by_other_servers, stats.available), (1, 1, 1))
 
     def test_a_subject_given_back_on_one_server_is_free_for_the_other(self):
         users = [self.alice, self.first.create_user("carol")[0], self.first.create_user("dave")[0]]
-        leases = [self.first.next_subject(user, REVIEWER) for user in users]
+        leases = [self.first.next_scan(user, REVIEWER) for user in users]
         with self.assertRaises(QCError) as ctx:
-            self.second.next_subject(self.bob, REVIEWER)
+            self.second.next_scan(self.bob, REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)
 
         self.first.release_assignment(leases[1].assignment_id)
-        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, leases[1].subject_key)
+        self.assertEqual(self.second.next_scan(self.bob, REVIEWER).scan_key, leases[1].scan_key)
 
     def test_an_expired_lease_on_another_server_blocks_nothing(self):
-        lease = self.first.next_subject(self.alice, REVIEWER)
+        lease = self.first.next_scan(self.alice, REVIEWER)
         lease.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
         self.first._save_assignments()
-        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, lease.subject_key)
+        self.assertEqual(self.second.next_scan(self.bob, REVIEWER).scan_key, lease.scan_key)
 
     def test_a_subject_in_progress_on_one_server_is_not_handed_out_by_the_other(self):
         """Its verdicts wait for the first server's administrator; the dataset does not show them yet."""
         self.review(self.first, self.alice, rejected=["FEMUR_RIGHT"])
-        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000002")
+        self.assertEqual(self.second.next_scan(self.bob, REVIEWER).scan_key, "ds-0001/sub-000002/scan-01")
         self.assertEqual(self.second.stats().assigned_by_other_servers, 1)
 
     def test_once_approved_there_it_is_done_here_too(self):
         self.review(self.first, self.alice)
-        self.first.approve("001_000001")
+        self.first.approve("ds-0001/sub-000001/scan-01")
         self.second.refresh_index()
-        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000002")
-        self.assertEqual(self.second.stats().eligible_subjects, 2, "the dataset says it is reviewed")
+        self.assertEqual(self.second.next_scan(self.bob, REVIEWER).scan_key, "ds-0001/sub-000002/scan-01")
+        self.assertEqual(self.second.stats().eligible_scans, 2, "the dataset says it is reviewed")
 
     def test_a_subject_closed_on_one_server_is_free_for_the_other(self):
         self.review(self.first, self.alice, rejected=["FEMUR_RIGHT"])
-        self.first.close_case("001_000001")
-        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000001")
+        self.first.close_case("ds-0001/sub-000001/scan-01")
+        self.assertEqual(self.second.next_scan(self.bob, REVIEWER).scan_key, "ds-0001/sub-000001/scan-01")
 
     def test_a_broken_state_file_of_another_server_is_ignored(self):
         """Another server may be halfway through replacing its file."""
         (self.first.state_dir / "assignments.json").write_text("[{ truncated", encoding="utf-8")
         (self.first.state_dir / "cases.json").write_text("[{ truncated", encoding="utf-8")
-        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000001")
+        self.assertEqual(self.second.next_scan(self.bob, REVIEWER).scan_key, "ds-0001/sub-000001/scan-01")
+
+
+class OldFormatStateTests(QCTestCase):
+    """A server folder kept by a server of BoneHub data schema 0.3 is refused, not misread: its
+    cases and assignments name subjects of the old layout."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.default_dataset(n_scans=1)
+        self.state_dir.mkdir(parents=True)
+
+    def assert_refused(self) -> None:
+        with self.assertRaises(RuntimeError) as ctx:
+            self.make_store()
+        message = str(ctx.exception)
+        self.assertIn(str(self.state_dir), message)
+        self.assertIn("0.3", message)
+        self.assertIn("move the folder out", message)
+
+    def test_a_folder_whose_session_says_schema_0_3_is_refused(self):
+        (self.state_dir / "session.json").write_text(
+            json.dumps({"server_id": "qc_test_server", "server_version": "0.4.0", "schema_version": "0.3.0"}),
+            encoding="utf-8",
+        )
+        (self.state_dir / "cases.json").write_text("[]", encoding="utf-8")
+        before = sorted(path.name for path in self.state_dir.iterdir())
+        self.assert_refused()
+        self.assertEqual(sorted(path.name for path in self.state_dir.iterdir()), before, "nothing is written in it")
+
+    def test_a_folder_whose_cases_name_subjects_is_refused(self):
+        (self.state_dir / "cases.json").write_text(
+            json.dumps([{"subject_key": "001_000001", "dataset_id": 1, "subject_id": 1, "stage": "review"}]),
+            encoding="utf-8",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            self.make_store()
+        self.assertIn("move the folder out", str(ctx.exception))
+
+    def test_once_moved_away_the_same_server_starts_a_new_folder(self):
+        (self.state_dir / "session.json").write_text(json.dumps({"schema_version": "0.3.0"}), encoding="utf-8")
+        self.state_dir.rename(self.state_root / "qc_test_server.schema-0.3")
+        store = self.make_store()
+        self.assertEqual(store.state_dir, self.state_dir)
+        self.assertEqual(store.stats().eligible_scans, 1)
+        session = json.loads((self.state_dir / "session.json").read_text(encoding="utf-8"))
+        self.assertEqual(session["schema_version"], SCHEMA_VERSION)
+
+    def test_a_folder_of_this_format_starts(self):
+        self.make_store()
+        close_logging(self._stores.pop())
+        self.make_store()
 
 
 class SessionRecordTests(QCTestCase):

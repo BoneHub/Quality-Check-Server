@@ -17,7 +17,7 @@ from tests.support import QCTestCase
 class CommandLineTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.default_dataset(n_subjects=2)
+        self.default_dataset(n_scans=2)
 
     def cli(self, command: str, *argv: str) -> str:
         """Run one command against the temporary dataset and return what it printed."""
@@ -83,20 +83,20 @@ class CommandLineTests(QCTestCase):
 
     def test_stats_prints_the_queue(self):
         output = self.cli("stats")
-        self.assertIn("total_subjects: 2", output)
-        self.assertIn("eligible_subjects: 2", output)
+        self.assertIn("total_scans: 2", output)
+        self.assertIn("eligible_scans: 2", output)
 
     def test_show_config_prints_the_policy(self):
         output = self.cli("show-config")
-        self.assertIn("eligible_label_values: [1]", output)
-        self.assertIn("mark_removed_labels_absent: True", output)
+        self.assertIn("eligible_review_states: ['not_reviewed']", output)
+        self.assertIn("eligible_origins: None", output)
 
     def test_the_dataset_root_can_come_from_the_environment(self):
         os.environ[f"{ENV_PREFIX}DATASET_ROOT"] = str(self.dataset_root)
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             self.assertEqual(main(["stats"]), 0)
-        self.assertIn("total_subjects: 2", buffer.getvalue())
+        self.assertIn("total_scans: 2", buffer.getvalue())
 
     def test_a_missing_dataset_root_is_a_clear_error(self):
         with self.assertRaises(SystemExit):

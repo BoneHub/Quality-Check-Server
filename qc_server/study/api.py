@@ -4,7 +4,7 @@ The paths are the quality check's (see :mod:`qc_server.api`), so the review page
 study server as it does on a quality-check server:
 
 1. ``GET  /api/v1/ping``                          - the key, and the rater's code and progress
-2. ``POST /api/v1/subjects/next``                 - the rater's next reading
+2. ``POST /api/v1/scans/next``                    - the rater's next reading
 3. ``GET  /api/v1/assignments/{id}/image``        - its image, from the dataset
 4. ``GET  /api/v1/assignments/{id}/segmentation`` - its segmentation: the study's copy
 5. ``POST /api/v1/assignments/{id}/submit``       - the verdict, as in the quality check
@@ -12,7 +12,7 @@ study server as it does on a quality-check server:
 Only the review page, in the reviewer role, works with a study server: there is nothing for
 3D Slicer to do here. A submission is the review page's ``metadata`` part, read as a
 :class:`~qc_server.models.SubmissionRequest`, as a reviewer's verdict in the quality check:
-every bone accepted or rejected, or the subject rejected as a whole. Reporting a bone missing
+every bone accepted or rejected, or the scan rejected as a whole. Reporting a bone missing
 and uploading a segmentation are refused.
 """
 
@@ -23,11 +23,11 @@ import json
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from bonehub_data_schema import SEGMENTATION_SUFFIX, VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION, SEGMENTATION_SUFFIX
 
 from .. import __version__
 from ..api import ROLE_HEADER, _read_in_chunks
-from ..config import STUDY_MODE
+from ..config import ORIGIN_KINDS, REVIEW_STATES, STUDY_MODE
 from ..models import REVIEWER, HandoutLabel, HandoutSegment, SubmissionRequest, User
 from ..segmentation import SegmentationError, read_segment_table
 from ..store import LABEL_NAME_TO_VALUE, QCError, QCStore
@@ -87,7 +87,6 @@ def ping(request: Request, user: User = Depends(get_rater)) -> dict:
         "allowed_dataset_ids": user.allowed_dataset_ids,
         "data_access": user.data_access,
         "edits_need_review": True,
-        "mark_removed_labels_absent": False,
         "lease_ttl_seconds": None,
         "study": get_study(request).rater_status(user),
     }
@@ -95,16 +94,17 @@ def ping(request: Request, user: User = Depends(get_rater)) -> dict:
 
 @router.get("/labels")
 def labels(user: User = Depends(get_rater)) -> dict:
-    """The BoneHub label map and label statuses, as on a quality-check server."""
+    """The BoneHub label map, and what label origins and review states mean, as on a quality-check server."""
     return {
         "schema_version": SCHEMA_VERSION,
         "label_name_to_value": LABEL_NAME_TO_VALUE,
-        "label_status_values": {str(k): v for k, v in VALID_LABEL_VALUES.items()},
+        "label_origins": ORIGIN_KINDS,
+        "review_states": REVIEW_STATES,
         "segmentation_suffix": SEGMENTATION_SUFFIX,
     }
 
 
-@router.post("/subjects/next", response_model=StudyHandout)
+@router.post("/scans/next", response_model=StudyHandout)
 def next_reading(request: Request, user: User = Depends(get_rater)) -> StudyHandout:
     """The rater's next reading. A rater holds one at a time: asking again before submitting
     it gives the same one back."""
@@ -130,23 +130,23 @@ def reading_detail(assignment_id: str, request: Request, user: User = Depends(ge
 @router.get("/assignments/{assignment_id}/image")
 def download_image(assignment_id: str, request: Request, user: User = Depends(get_rater)) -> StreamingResponse:
     store, study = get_store(request), get_study(request)
-    the_study, _, subject = study.reading_context(study.held_reading(assignment_id, user))
-    path = store.image_path(subject.dataset_id, subject.subject_id)
+    the_study, _, scan = study.reading_context(study.held_reading(assignment_id, user))
+    path = store.image_path(scan.scan_key)
     if not path.exists():
         raise QCError("The image of this reading is missing on the server. Tell the administrator.", status_code=404)
-    name = path.name if the_study.settings.show_subject_id else "reading.nii.gz"
+    name = f"{_file_stem(scan.scan_key)}.nii.gz" if the_study.settings.show_scan_id else "reading.nii.gz"
     return _send(path, "application/gzip", name)
 
 
 @router.get("/assignments/{assignment_id}/segmentation")
 def download_segmentation(assignment_id: str, request: Request, user: User = Depends(get_rater)) -> StreamingResponse:
-    """The study's copy of the subject's segmentation, the same file at every reading."""
+    """The study's copy of the scan's segmentation, the same file at every reading."""
     study = get_study(request)
-    the_study, _, subject = study.reading_context(study.held_reading(assignment_id, user))
-    path = study.copy_path(subject.subject_key)
+    the_study, _, scan = study.reading_context(study.held_reading(assignment_id, user))
+    path = study.copy_path(scan.scan_key)
     if not path.exists():
         raise QCError("The segmentation of this reading is missing on the server. Tell the administrator.", status_code=404)
-    name = path.name if the_study.settings.show_subject_id else f"reading{SEGMENTATION_SUFFIX}"
+    name = f"{_file_stem(scan.scan_key) if the_study.settings.show_scan_id else 'reading'}{SEGMENTATION_SUFFIX}"
     return _send(path, "application/octet-stream", name)
 
 
@@ -173,7 +173,7 @@ def submit(
     user: User = Depends(get_rater),
 ) -> ReadingResult:
     """Record the reading: every bone of the segmentation accepted (``confirmed_labels``) or
-    rejected (``rejected_labels``); or, with ``quality_check_confirmed=false``, the subject
+    rejected (``rejected_labels``); or, with ``quality_check_confirmed=false``, the scan
     rejected as a whole."""
     try:
         payload = SubmissionRequest(**json.loads(metadata))
@@ -193,7 +193,7 @@ def submit(
         payload.confirmed_labels,
         payload.rejected_labels,
         payload.comment,
-        subject_rejected=not payload.quality_check_confirmed,
+        scan_rejected=not payload.quality_check_confirmed,
     )
 
 
@@ -201,27 +201,31 @@ def submit(
 def _handout(store: QCStore, study: StudyStore, held: HeldReading, user: User) -> StudyHandout:
     """A reading as the review page shows it: every bone, none judged, and nothing that says
     what anyone made of it before."""
-    the_study, rater, subject = study.reading_context(held)
-    show = the_study.settings.show_subject_id
-    copy = study.copy_path(subject.subject_key)
+    the_study, rater, scan = study.reading_context(held)
+    show = the_study.settings.show_scan_id
+    copy = study.copy_path(scan.scan_key)
     try:
         segments = read_segment_table(copy)
     except (SegmentationError, OSError):
         segments = []
-    info = store.dataset_info(subject.dataset_id)
+    try:
+        modality = store.scan_info(scan.scan_key).modality
+    except QCError:
+        modality = None
     base = f"/api/v1/assignments/{held.assignment_id}"
-    has_image = store.image_path(subject.dataset_id, subject.subject_id).exists()
+    has_image = store.image_path(scan.scan_key).exists()
     return StudyHandout(
         assignment_id=held.assignment_id,
-        subject_key=subject.subject_key if show else None,
-        dataset_id=subject.dataset_id if show else None,
-        subject_id=subject.subject_id if show else None,
+        scan_key=scan.scan_key if show else None,
+        dataset_id=scan.dataset_id if show else None,
+        subject_id=scan.subject_id if show else None,
+        scan_id=scan.scan_id if show else None,
         data_access=user.data_access,
         has_image=has_image,
         has_segmentation=copy.exists(),
         labels=[
             HandoutLabel(name=bone, value=LABEL_NAME_TO_VALUE.get(bone), state="pending", painted=True)
-            for bone in subject.bones
+            for bone in scan.bones
         ],
         segments=[
             HandoutSegment(
@@ -233,17 +237,23 @@ def _handout(store: QCStore, study: StudyStore, held: HeldReading, user: User) -
             )
             for segment in segments
         ],
-        dataset_info=info if show else {key: info[key] for key in ("modality",) if key in info},
+        scan_info={"modality": modality} if modality else {},
+        dataset_info=store.dataset_info(scan.dataset_id) if show else {},
         image_url=f"{base}/image" if has_image else None,
         segmentation_url=f"{base}/segmentation",
         study=ReadingInfo(
             code=rater.code,
             position=held.position,
             total=len(rater.order),
-            title=subject.subject_key if show else f"Reading {held.position}",
-            show_subject_id=show,
+            title=scan.scan_key if show else f"Reading {held.position}",
+            show_scan_id=show,
         ),
     )
+
+
+def _file_stem(scan_key: str) -> str:
+    """A scan's key as a file name: ds-0027_sub-000001_scan-01."""
+    return scan_key.replace("/", "_")
 
 
 def _send(path, media_type: str, filename: str) -> StreamingResponse:

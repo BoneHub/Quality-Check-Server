@@ -1,9 +1,9 @@
 """Reading an uploaded segmentation, writing it in canonical form, and describing a stored one.
 
-The dataset keeps its masks in BoneHub's segmentation format (``.seg.nrrd``, see
-``bonehub_data_schema/segmentation_file.py``): voxels hold per-file segment numbers, and the
+A scan keeps its mask in BoneHub's segmentation format (``segmentation.seg.nrrd``, see
+``bonehub_format/segmentation_file.py``): voxels hold per-file segment numbers, and the
 header maps each number to a ``BoneLabelMap`` value. An upload is read by the same rules as
-the schema's ``read_segmentation`` -- a segment's ``BoneHubValue`` tag, else its name -- and
+the format's ``read_segmentation`` -- a segment's ``BoneHubValue`` tag, else its name -- and
 is then written back through ``write_indexed_segmentation``, so what waits for approval, and
 later lands in the dataset, is always the canonical form, whichever client wrote the upload.
 :func:`changed_labels` tells which labels an upload changed, voxel by voxel.
@@ -21,9 +21,9 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from bonehub_data_schema import SEGMENTATION_SUFFIX, BoneLabelMap, segment_number_dtype, write_indexed_segmentation
+from bonehub_format import SEGMENTATION_SUFFIX, BoneLabelMap, segment_number_dtype, write_indexed_segmentation
 
-#: Segment tags the schema writes: ``BoneHubLabel:<name>|BoneHubValue:<value>|``.
+#: Segment tags the format writes: ``BoneHubLabel:<name>|BoneHubValue:<value>|``.
 LABEL_TAG = "BoneHubLabel"
 VALUE_TAG = "BoneHubValue"
 
@@ -36,7 +36,7 @@ _CHUNK_SLICES = 32
 #: Tolerance on the voxel-to-world matrix when an upload is compared with the image, in mm.
 _GEOMETRY_TOLERANCE = 1e-3
 
-#: Colour given to a segment whose header records none. The schema always writes one.
+#: Colour given to a segment whose header records none. The format always writes one.
 _FALLBACK_COLOR = (0.6, 0.6, 0.6)
 
 _LABEL_NAMES = {label.value: label.name for label in BoneLabelMap if label.value != 0}
@@ -247,7 +247,7 @@ def write_segmentation(upload: UploadedSegmentation, output_path: Path) -> list[
 def _segment_values(reader: sitk.ImageFileReader) -> dict[int, int]:
     """``{segment number: BoneLabelMap value}`` from the header, as ``read_segmentation`` reads it.
 
-    Stricter than the schema's reader in one way: a segment whose name is one BoneHub label
+    Stricter than the format's reader in one way: a segment whose name is one BoneHub label
     while its tags say another is refused, since there is no telling which one was meant.
     """
     value_of: dict[int, int] = {}
@@ -275,7 +275,7 @@ def _value_of_segment(name: str, tags: dict[str, str]) -> int:
     by_name = _LABEL_VALUES.get(name)
     if VALUE_TAG not in tags:
         if by_name is None:
-            raise SegmentationError(f"Segment '{name}' is not a BoneHub label. See 'bonehub_data_schema/labelmap.py'.")
+            raise SegmentationError(f"Segment '{name}' is not a BoneHub label. See 'bonehub_format/labelmap.py'.")
         return by_name
 
     try:

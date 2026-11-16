@@ -2,7 +2,7 @@
 
 The study server's :class:`~qc_server.store.QCStore` keeps the user accounts and reads the
 dataset; this store keeps the study, in a folder of the server's state (see
-:mod:`qc_server.study`). A re-entrant lock serialises it. Copying the subjects' segmentations
+:mod:`qc_server.study`). A re-entrant lock serialises it. Copying the scans' segmentations
 at Start runs outside the lock, so that raters' requests are not held up by it.
 """
 
@@ -16,12 +16,12 @@ import threading
 import uuid
 from pathlib import Path
 
-from bonehub_data_schema import SEGMENTATION_SUFFIX, SubjectInfo, is_compatible_schema_version
+from bonehub_format import DatasetInfo, ScanInfo, is_compatible_schema_version, layout
 
 from ..audit import utc_now_iso
 from ..models import DATA_ACCESS_DESCRIPTIONS, DEFAULT_DATA_ACCESS, User
 from ..segmentation import SegmentationError, check_stored_geometry, read_segment_table
-from ..store import QCError, QCStore, _atomic_write_json, _read_json, file_fingerprint, subject_key_of
+from ..store import QCError, QCStore, _atomic_write_json, _read_json, _scan_folders, file_fingerprint
 from .models import (
     ACCEPT,
     REJECT,
@@ -31,9 +31,9 @@ from .models import (
     Study,
     StudyRater,
     StudySettings,
-    StudySubject,
+    StudyScan,
 )
-from .schedule import default_gap, gap_problem, pick_subjects, rater_codes, reading_orders, subject_ids
+from .schedule import default_gap, gap_problem, pick_scans, rater_codes, reading_orders, scan_ids
 
 STUDY_DIR_NAME = "study"
 STUDY_FILE_NAME = "study.json"
@@ -41,7 +41,7 @@ HELD_FILE_NAME = "held.json"
 READINGS_FILE_NAME = "readings.jsonl"
 COPIES_DIR_NAME = "segmentations"
 
-#: At most this many skipped subjects are listed by a preview.
+#: At most this many skipped scans are listed by a preview.
 MAX_SKIPPED_LISTED = 50
 
 
@@ -75,9 +75,9 @@ class StudyStore:
     def copies_dir(self) -> Path:
         return self.folder / COPIES_DIR_NAME
 
-    def copy_path(self, subject_key: str) -> Path:
-        """Where the study keeps its copy of a subject's segmentation."""
-        return self.copies_dir / f"{subject_key}{SEGMENTATION_SUFFIX}"
+    def copy_path(self, scan_key: str) -> Path:
+        """Where the study keeps its copy of a scan's segmentation: under the scan's path."""
+        return self.copies_dir / layout.scan_key(*scan_ids(scan_key)) / layout.SEGMENTATION_FILE
 
     def _load_study(self) -> Study | None:
         raw = _read_json(self.study_path)
@@ -150,14 +150,15 @@ class StudyStore:
                 "ended_at": study.ended_at,
                 "settings": study.settings.model_dump(),
                 "min_gap": study.min_gap,
-                "subjects": [
+                "scans": [
                     {
-                        "subject_key": subject.subject_key,
-                        "dataset_id": subject.dataset_id,
-                        "subject_id": subject.subject_id,
-                        "bones": len(subject.bones),
+                        "scan_key": scan.scan_key,
+                        "dataset_id": scan.dataset_id,
+                        "subject_id": scan.subject_id,
+                        "scan_id": scan.scan_id,
+                        "bones": len(scan.bones),
                     }
-                    for subject in study.subjects
+                    for scan in study.scans
                 ],
                 "raters": [
                     {
@@ -183,7 +184,7 @@ class StudyStore:
     # --------------------------------------------------- preview, start, end
     def preview(self, settings: StudySettings) -> dict:
         """Save the settings as the study's draft, and say what they make of the study: its
-        subjects, the raters' codes, and how many readings each rater has. Changes nothing
+        scans, the raters' codes, and how many readings each rater has. Changes nothing
         once the study has started."""
         with self._lock:
             self._require_draft()
@@ -199,16 +200,16 @@ class StudyStore:
         return self._plan(settings).summary()
 
     def start(self, settings: StudySettings) -> dict:
-        """Start the study with these settings: fix its subjects and copy their segmentations,
+        """Start the study with these settings: fix its scans and copy their segmentations,
         give each rater a code and a list, and begin handing out readings."""
         with self._lock:
             self._require_draft()
             self._starting = True
         try:
             plan = self._plan(settings)
-            subjects = self._copy_segmentations(plan)
+            scans = self._copy_segmentations(plan)
             codes = plan.codes
-            keys = [subject.subject_key for subject in subjects]
+            keys = [scan.scan_key for scan in scans]
             orders = reading_orders(keys, codes, settings.readings_per_rater, plan.gap, settings.seed)
             now = utc_now_iso()
             with self._lock:
@@ -221,7 +222,7 @@ class StudyStore:
                     updated_at=now,
                     started_at=now,
                     min_gap=plan.gap,
-                    subjects=subjects,
+                    scans=scans,
                     raters=[StudyRater(name=name, code=codes[name], order=orders[name]) for name in sorted(codes)],
                 )
                 self._held = {}
@@ -236,14 +237,14 @@ class StudyStore:
             "study_started",
             {
                 "study": settings.name,
-                "subjects": [subject.subject_key for subject in subjects],
+                "scans": [scan.scan_key for scan in scans],
                 "raters": {name: codes[name] for name in sorted(codes)},
                 "readings_per_rater": settings.readings_per_rater,
                 "min_gap": plan.gap,
                 "seed": settings.seed,
             },
             summary=(
-                f"Study '{settings.name}' started: {len(subjects)} subject(s), {len(codes)} rater(s), "
+                f"Study '{settings.name}' started: {len(scans)} scan(s), {len(codes)} rater(s), "
                 f"{settings.readings_per_rater} reading(s) each, minimum gap {plan.gap}, seed {settings.seed}."
             ),
         )
@@ -309,23 +310,23 @@ class StudyStore:
         cannot make one."""
         reader = _DatasetReader(self.store)
         skipped: list[tuple[str, str]] = []
-        if settings.subject_mode == "list":
-            problems = [(key, reader.problem_of(key)) for key in settings.subject_keys]
+        if settings.scan_mode == "list":
+            problems = [(key, reader.problem_of(key)) for key in settings.scan_keys]
             problems = [(key, problem) for key, problem in problems if problem]
             if problems:
                 raise QCError(
-                    "These subjects cannot be in the study: "
+                    "These scans cannot be in the study: "
                     + "; ".join(f"{key}: {problem}" for key, problem in problems)
                     + "."
                 )
-            keys = list(settings.subject_keys)
+            keys = list(settings.scan_keys)
         else:
             for dataset_id in settings.random_dataset_ids or []:
                 problem = reader.dataset_problem(dataset_id)
                 if problem:
                     raise QCError(f"Dataset {dataset_id} cannot be used: {problem}.")
             candidates = reader.candidates(settings.random_dataset_ids)
-            keys, skipped = pick_subjects(candidates, settings.random_count, settings.seed, reader.problem_of)
+            keys, skipped = pick_scans(candidates, settings.random_count, settings.seed, reader.problem_of)
             if len(keys) < settings.random_count:
                 where = (
                     f"dataset(s) {', '.join(map(str, settings.random_dataset_ids))}"
@@ -333,7 +334,7 @@ class StudyStore:
                     else "the datasets"
                 )
                 raise QCError(
-                    f"Only {len(keys)} subject(s) of {where} can be in the study, with an image and a segmentation "
+                    f"Only {len(keys)} scan(s) of {where} can be in the study, with an image and a segmentation "
                     f"on its voxel grid; {settings.random_count} were asked for."
                 )
 
@@ -344,11 +345,11 @@ class StudyStore:
             raise QCError(problem)
         if len(settings.raters) < 2 and settings.readings_per_rater < 2:
             raise QCError(
-                "With one rater who reads each subject once there is nothing to compare. Choose two raters or more, "
+                "With one rater who reads each scan once there is nothing to compare. Choose two raters or more, "
                 "or two readings per rater or more."
             )
 
-        dataset_ids = sorted({subject_ids(key)[0] for key in keys})
+        dataset_ids = sorted({scan_ids(key)[0] for key in keys})
         users = {user["name"]: user for user in self.store.list_users()}
         rater_problems = [
             problem for name in settings.raters if (problem := _rater_problem(name, users.get(name), dataset_ids))
@@ -358,39 +359,41 @@ class StudyStore:
 
         return _Plan(
             settings=settings,
-            subject_keys=keys,
+            scan_keys=keys,
             bones={key: reader.bones_of(key) for key in keys},
             skipped=skipped,
             gap=gap,
             codes=rater_codes(settings.raters, settings.seed),
         )
 
-    def _copy_segmentations(self, plan: "_Plan") -> list[StudySubject]:
-        """Copy each study subject's segmentation into the study's folder, and check the copy:
+    def _copy_segmentations(self, plan: "_Plan") -> list[StudyScan]:
+        """Copy each study scan's segmentation into the study's folder, and check the copy:
         what the raters see is this copy, whatever happens to the dataset meanwhile."""
         if self.copies_dir.exists():
             shutil.rmtree(self.copies_dir)
         self.copies_dir.mkdir(parents=True)
-        subjects = []
-        for key in plan.subject_keys:
-            dataset_id, subject_id = subject_ids(key)
+        scans = []
+        for key in plan.scan_keys:
+            dataset_id, subject_id, scan_id = scan_ids(key)
             target = self.copy_path(key)
+            target.parent.mkdir(parents=True, exist_ok=True)
             partial = target.with_name(target.name + ".tmp")
-            shutil.copyfile(self.store.segmentation_path(dataset_id, subject_id), partial)
+            shutil.copyfile(self.store.segmentation_path(key), partial)
             os.replace(partial, target)
-            problem = _segmentation_problem(target, self.store.image_path(dataset_id, subject_id))
+            problem = _segmentation_problem(target, self.store.image_path(key))
             if problem:
-                raise QCError(f"Subject {key} cannot be in the study: {problem}. Nothing was started.")
-            subjects.append(
-                StudySubject(
-                    subject_key=key,
+                raise QCError(f"Scan {key} cannot be in the study: {problem}. Nothing was started.")
+            scans.append(
+                StudyScan(
+                    scan_key=key,
                     dataset_id=dataset_id,
                     subject_id=subject_id,
+                    scan_id=scan_id,
                     bones=_bones_of(target),
                     segmentation_sha256=file_fingerprint(target).sha256,
                 )
             )
-        return subjects
+        return scans
 
     # -------------------------------------------------------------- raters
     def rater_status(self, user: User) -> dict:
@@ -403,7 +406,7 @@ class StudyStore:
                 "code": rater.code if rater else None,
                 "readings_done": self._done_counts().get(user.name, 0) if rater else 0,
                 "readings_total": len(rater.order) if rater else 0,
-                "show_subject_id": bool(study and study.settings.show_subject_id),
+                "show_scan_id": bool(study and study.settings.show_scan_id),
             }
 
     def next_reading(self, user: User) -> HeldReading:
@@ -419,8 +422,8 @@ class StudyStore:
                 raise QCError(
                     f"You have finished all {len(rater.order)} of your study readings. Thank you.", status_code=404
                 )
-            subject = study.subject(rater.order[done][0])
-            _require_dataset(user, subject.dataset_id)
+            scan = study.scan(rater.order[done][0])
+            _require_dataset(user, scan.dataset_id)
             held = HeldReading(
                 assignment_id=uuid.uuid4().hex, rater=user.name, position=done + 1, handed_at=utc_now_iso()
             )
@@ -433,9 +436,9 @@ class StudyStore:
                 "user": user.name,
                 "code": rater.code,
                 "position": held.position,
-                "subject_key": subject.subject_key,
+                "scan_key": scan.scan_key,
             },
-            summary=f"Study reading {held.position} of {len(rater.order)} handed to '{user.name}' ({subject.subject_key}).",
+            summary=f"Study reading {held.position} of {len(rater.order)} handed to '{user.name}' ({scan.scan_key}).",
         )
         return held
 
@@ -454,22 +457,22 @@ class StudyStore:
                     raise QCError("This reading was submitted already.", status_code=409)
                 raise QCError(
                     "This reading is not open: it was released, the study ended, or it never existed. Ask for the "
-                    "next subject.",
+                    "next scan.",
                     status_code=404,
                 )
             if held.rater != user.name:
                 raise QCError("This reading belongs to another rater.", status_code=403)
             return held
 
-    def reading_context(self, held: HeldReading) -> tuple[Study, StudyRater, StudySubject]:
-        """The study, rater and subject of an open reading."""
+    def reading_context(self, held: HeldReading) -> tuple[Study, StudyRater, StudyScan]:
+        """The study, rater and scan of an open reading."""
         with self._lock:
             study = self._study
             if study is None:
                 raise QCError("There is no study on this server.", status_code=404)
             rater = study.rater(held.rater)
-            subject = study.subject(rater.order[held.position - 1][0])
-            return study.model_copy(deep=True), rater.model_copy(deep=True), subject.model_copy(deep=True)
+            scan = study.scan(rater.order[held.position - 1][0])
+            return study.model_copy(deep=True), rater.model_copy(deep=True), scan.model_copy(deep=True)
 
     def release(self, assignment_id: str, user: User) -> HeldReading:
         """Hand an open reading back. It is the rater's next reading all the same: readings
@@ -492,13 +495,13 @@ class StudyStore:
         accepted: list[str] | None,
         rejected: list[str] | None,
         comment: str | None,
-        subject_rejected: bool = False,
+        scan_rejected: bool = False,
     ) -> ReadingResult:
-        """Record a reading: a verdict on every bone of the subject, accept or reject -- or the
-        subject rejected as a whole, which rejects every bone and sets the rest aside."""
+        """Record a reading: a verdict on every bone of the scan, accept or reject -- or the
+        scan rejected as a whole, which rejects every bone and sets the rest aside."""
         _require_reader(user)
         rejected = list(rejected or [])
-        if subject_rejected:
+        if scan_rejected:
             accepted, rejected = [], []
         elif accepted is None:
             raise QCError("Name the bones you accept in confirmed_labels, and those you reject in rejected_labels.")
@@ -510,9 +513,9 @@ class StudyStore:
         with self._lock:
             study, rater = self._running_study_of(user, submitting=True)
             held = self.held_reading(assignment_id, user)
-            subject_key, reading_number = rater.order[held.position - 1]
-            bones = set(study.subject(subject_key).bones)
-            if subject_rejected:
+            scan_key, reading_number = rater.order[held.position - 1]
+            bones = set(study.scan(scan_key).bones)
+            if scan_rejected:
                 rejected = sorted(bones)
             both = sorted(set(accepted) & set(rejected))
             unknown = sorted((set(accepted) | set(rejected)) - bones)
@@ -528,12 +531,12 @@ class StudyStore:
                 rater=user.name,
                 code=rater.code,
                 position=held.position,
-                subject_key=subject_key,
+                scan_key=scan_key,
                 reading=reading_number,
                 handed_at=held.handed_at,
                 submitted_at=utc_now_iso(),
                 verdicts={bone: (REJECT if bone in rejected else ACCEPT) for bone in sorted(bones)},
-                subject_rejected=subject_rejected,
+                scan_rejected=scan_rejected,
                 comment=comment,
             )
             self._append_reading(reading)
@@ -549,18 +552,18 @@ class StudyStore:
                 "user": user.name,
                 "code": rater.code,
                 "position": reading.position,
-                "subject_key": subject_key,
+                "scan_key": scan_key,
                 "reading": reading_number,
                 "accepted": len(bones) - len(rejected),
                 "rejected": len(rejected),
-                "subject_rejected": subject_rejected,
+                "scan_rejected": scan_rejected,
                 "comment": comment,
             },
             summary=(
-                f"Study reading {reading.position} of {total} by '{user.name}' ({subject_key}): "
+                f"Study reading {reading.position} of {total} by '{user.name}' ({scan_key}): "
                 + (
-                    "the subject rejected."
-                    if subject_rejected
+                    "the scan rejected."
+                    if scan_rejected
                     else f"{len(bones) - len(rejected)} accepted, {len(rejected)} rejected."
                 )
             ),
@@ -569,12 +572,12 @@ class StudyStore:
             assignment_id=assignment_id,
             accepted_labels=sorted(bones - set(rejected)),
             rejected_labels=sorted(rejected),
-            subject_rejected=subject_rejected,
+            scan_rejected=scan_rejected,
             readings_done=done,
             readings_total=total,
             message=(
                 f"Reading {reading.position} of {total} recorded"
-                + (": the subject rejected." if subject_rejected else ".")
+                + (": the scan rejected." if scan_rejected else ".")
                 + (" That was your last one. Thank you." if done == total else "")
             ),
         )
@@ -598,29 +601,30 @@ class StudyStore:
 class _Plan:
     """What a study's settings make of it, before it starts."""
 
-    def __init__(self, settings, subject_keys, bones, skipped, gap, codes):
+    def __init__(self, settings, scan_keys, bones, skipped, gap, codes):
         self.settings = settings
-        self.subject_keys = subject_keys
+        self.scan_keys = scan_keys
         self.bones = bones
         self.skipped = skipped
         self.gap = gap
         self.codes = codes
 
     def summary(self) -> dict:
-        n = len(self.subject_keys)
+        n = len(self.scan_keys)
         readings = self.settings.readings_per_rater
         return {
             "settings": self.settings.model_dump(),
-            "subjects": [
+            "scans": [
                 {
-                    "subject_key": key,
-                    "dataset_id": subject_ids(key)[0],
-                    "subject_id": subject_ids(key)[1],
+                    "scan_key": key,
+                    "dataset_id": scan_ids(key)[0],
+                    "subject_id": scan_ids(key)[1],
+                    "scan_id": scan_ids(key)[2],
                     "bones": len(self.bones[key]),
                 }
-                for key in self.subject_keys
+                for key in self.scan_keys
             ],
-            "skipped": [{"subject_key": key, "reason": reason} for key, reason in self.skipped[:MAX_SKIPPED_LISTED]],
+            "skipped": [{"scan_key": key, "reason": reason} for key, reason in self.skipped[:MAX_SKIPPED_LISTED]],
             "skipped_count": len(self.skipped),
             "raters": [
                 {"name": name, "code": code}
@@ -634,12 +638,11 @@ class _Plan:
 
 
 class _DatasetReader:
-    """The dataset as one preview or start reads it: each file read once."""
+    """The database as one preview or start reads it: each file read once."""
 
     def __init__(self, store: QCStore):
         self.store = store
         self._dataset_problems: dict[int, str | None] = {}
-        self._subjects: dict[int, dict[int, SubjectInfo]] = {}
         self._bones: dict[str, list[str]] = {}
 
     def dataset_problem(self, dataset_id: int) -> str | None:
@@ -655,73 +658,64 @@ class _DatasetReader:
         if not self.store.dataset_path(dataset_id).is_dir():
             return "there is no such dataset"
         try:
-            with open(self.store.dataset_info_path(dataset_id), "r", encoding="utf-8") as f:
-                version = json.load(f).get("schema_version")
-        except (OSError, ValueError, AttributeError) as exc:
-            return f"its Dataset_info file could not be read ({exc})"
+            version = DatasetInfo.load(self.store.dataset_info_path(dataset_id)).schema_version
+        except (OSError, ValueError) as exc:
+            return f"its {layout.DATASET_JSON} could not be read ({exc})"
         if not is_compatible_schema_version(version):
-            return f"it is written with schema version {version or '(not recorded)'}, which this server does not read"
-        if self.subjects(dataset_id) is None:
-            return "its Subject_info file could not be read"
+            return (
+                f"it is written in version {version or '(not recorded)'} of the BoneHub format, which this server "
+                "does not read"
+            )
         return None
 
-    def subjects(self, dataset_id: int) -> dict[int, SubjectInfo] | None:
-        """The dataset's subjects by id, or None when its Subject_info cannot be read."""
-        if dataset_id not in self._subjects:
-            try:
-                with open(self.store.subject_info_path(dataset_id), "r", encoding="utf-8") as f:
-                    entries = [SubjectInfo(**entry) for entry in json.load(f)]
-            except (OSError, ValueError, TypeError):
-                self._subjects[dataset_id] = None
-            else:
-                self._subjects[dataset_id] = {s.subject_id: s for s in entries if s.subject_id is not None}
-        return self._subjects[dataset_id]
-
     def candidates(self, dataset_ids: list[int] | None) -> list[str]:
-        """The subjects a random pick draws from: those that Subject_info says have an image and
-        a segmentation, in the usable datasets among ``dataset_ids`` (None: every dataset)."""
+        """The scans a random pick draws from: those whose scan.json lists a segmentation, in the
+        usable datasets among ``dataset_ids`` (None: every dataset)."""
         keys = []
-        for folder in sorted(self.store.dataset_root.glob("Dataset_*")):
-            try:
-                dataset_id = int(folder.name.split("_")[1])
-            except (IndexError, ValueError):
-                continue
-            if dataset_ids is not None and dataset_id not in dataset_ids:
+        for folder in sorted(self.store.dataset_root.glob("ds-*")):
+            dataset_id = layout.parse_dataset_dir(folder.name)
+            if dataset_id is None or (dataset_ids is not None and dataset_id not in dataset_ids):
                 continue
             if not folder.is_dir() or self.dataset_problem(dataset_id):
                 continue
-            for subject_id, subject in sorted(self.subjects(dataset_id).items()):
-                if subject.image and subject.available_labels("segmentation"):
-                    keys.append(subject_key_of(dataset_id, subject_id))
+            for subject_id, scan_id, scan_folder in _scan_folders(folder):
+                try:
+                    info = ScanInfo.load(scan_folder / layout.SCAN_JSON)
+                except (OSError, ValueError):
+                    continue
+                if info.segmentation:
+                    keys.append(layout.scan_key(dataset_id, subject_id, scan_id))
         return keys
 
-    def problem_of(self, subject_key: str) -> str | None:
-        """Why a subject cannot be in the study, or None: it needs an image, and a segmentation
+    def problem_of(self, scan_key: str) -> str | None:
+        """Why a scan cannot be in the study, or None: it needs an image, and a segmentation
         on the image's voxel grid that holds a bone."""
-        dataset_id, subject_id = subject_ids(subject_key)
+        dataset_id = scan_ids(scan_key)[0]
         problem = self.dataset_problem(dataset_id)
         if problem:
             return f"dataset {dataset_id} cannot be used: {problem}"
-        if subject_id not in self.subjects(dataset_id):
-            return "it is not in the dataset's Subject_info"
-        image = self.store.image_path(dataset_id, subject_id)
+        if not self.store.scan_info_path(scan_key).is_file():
+            return f"there is no such scan: it has no {layout.SCAN_JSON}"
+        if not self.store.subject_info_path(scan_key).is_file():
+            return f"its subject has no {layout.SUBJECT_JSON}: the converter has not finished it"
+        image = self.store.image_path(scan_key)
         if not image.exists():
             return "its image file is missing"
-        segmentation = self.store.segmentation_path(dataset_id, subject_id)
+        segmentation = self.store.segmentation_path(scan_key)
         if not segmentation.exists():
             return "it has no segmentation"
         return _segmentation_problem(segmentation, image)
 
-    def bones_of(self, subject_key: str) -> list[str]:
-        """The bones of a subject's segmentation, as its header lists them."""
-        if subject_key not in self._bones:
-            self._bones[subject_key] = _bones_of(self.store.segmentation_path(*subject_ids(subject_key)))
-        return self._bones[subject_key]
+    def bones_of(self, scan_key: str) -> list[str]:
+        """The bones of a scan's segmentation, as its header lists them."""
+        if scan_key not in self._bones:
+            self._bones[scan_key] = _bones_of(self.store.segmentation_path(scan_key))
+        return self._bones[scan_key]
 
 
 # --------------------------------------------------------------------- helpers
 def _rater_problem(name: str, user: dict | None, dataset_ids: list[int]) -> str | None:
-    """Why a user, as the user list gives them, cannot rate subjects of these datasets, or None."""
+    """Why a user, as the user list gives them, cannot rate scans of these datasets, or None."""
     if user is None:
         return f"'{name}' is not a user of this server"
     if not user["active"]:

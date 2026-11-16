@@ -1,6 +1,6 @@
 """The REST API the clients talk to, driven over HTTP.
 
-This walks the flow both clients follow: authenticate, ask for the next subject, download the
+This walks the flow both clients follow: authenticate, ask for the next scan, download the
 image and segmentation, then submit the verdict back -- a reviewer's from the review page, an
 editor's from the 3D Slicer extension -- and the administrator's approval that ends it.
 """
@@ -16,7 +16,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from bonehub_data_schema import __version__ as SCHEMA_VERSION
+from bonehub_format import SCHEMA_VERSION
 from qc_server import api
 from qc_server.app import create_app
 from qc_server.models import EDITOR, REVIEWER
@@ -28,12 +28,12 @@ class ApiTestCase(QCTestCase):
     """A running application over a temporary dataset, plus two logged-in clients.
 
     Both users are reviewers and editors. Requests go out in the reviewer role, as from the
-    review page, since every subject starts with the reviewers -- except a submission that
+    review page, since every scan starts with the reviewers -- except a submission that
     uploads a segmentation, which goes out in the editor role, as from 3D Slicer -- unless a
     test names another.
     """
 
-    n_subjects = 3
+    n_scans = 3
     config_kwargs: dict = {}
 
     def setUp(self) -> None:
@@ -54,7 +54,7 @@ class ApiTestCase(QCTestCase):
         self.bob_key = self.create_client_user("bob")
 
     def prepare_dataset(self) -> None:
-        self.default_dataset(n_subjects=self.n_subjects)
+        self.default_dataset(n_scans=self.n_scans)
 
     def build_config(self):
         from qc_server.config import QCServerConfig
@@ -70,8 +70,8 @@ class ApiTestCase(QCTestCase):
         """What a client sends with every request: its key, and the role it works in."""
         return {"X-API-Key": api_key, "X-Client-Role": role}
 
-    def next_subject(self, api_key: str, role: str = REVIEWER) -> dict:
-        response = self.client.post("/api/v1/subjects/next", headers=self.headers(api_key, role))
+    def next_scan(self, api_key: str, role: str = REVIEWER) -> dict:
+        response = self.client.post("/api/v1/scans/next", headers=self.headers(api_key, role))
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
@@ -89,9 +89,9 @@ class ApiTestCase(QCTestCase):
         )
 
     def judge(self, api_key: str, **metadata) -> dict:
-        """The next subject waiting for a review, judged on the review page: every label
+        """The next scan waiting for a review, judged on the review page: every label
         accepted unless ``rejected_labels`` says otherwise."""
-        handout = self.next_subject(api_key, REVIEWER)
+        handout = self.next_scan(api_key, REVIEWER)
         response = self.submit(api_key, handout["assignment_id"], True, use_stored_segmentation=True, **metadata)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
@@ -118,7 +118,7 @@ class HealthAndAuthTests(ApiTestCase):
         for method, path in [
             ("get", "/api/v1/ping"),
             ("get", "/api/v1/labels"),
-            ("post", "/api/v1/subjects/next"),
+            ("post", "/api/v1/scans/next"),
             ("get", "/api/v1/assignments"),
         ]:
             response = getattr(self.client, method)(path)
@@ -137,55 +137,60 @@ class HealthAndAuthTests(ApiTestCase):
         body = self.client.get("/api/v1/labels", headers=self.headers(self.alice_key)).json()
         self.assertEqual(body["label_name_to_value"]["FEMUR_LEFT"], LABEL_VALUE["FEMUR_LEFT"])
         self.assertNotIn("BACKGROUND", body["label_name_to_value"], "no segment can be background")
-        self.assertEqual(sorted(body["label_status_values"]), ["0", "1", "2"])
+        self.assertEqual(sorted(body["label_origins"]), ["derived", "manual", "model", "source"])
+        self.assertEqual(sorted(body["review_states"]), ["not_reviewed", "reviewed"])
         self.assertEqual(body["segmentation_suffix"], ".seg.nrrd")
         self.assertEqual(body["schema_version"], SCHEMA_VERSION)
 
 
 class HandoutTests(ApiTestCase):
-    def test_the_handout_describes_the_subject_and_where_to_fetch_it(self):
-        handout = self.next_subject(self.alice_key)
-        self.assertEqual(handout["subject_key"], "001_000001")
+    def test_the_handout_describes_the_scan_and_where_to_fetch_it(self):
+        handout = self.next_scan(self.alice_key)
+        self.assertEqual(handout["scan_key"], "ds-0001/sub-000001/scan-01")
+        self.assertEqual((handout["dataset_id"], handout["subject_id"], handout["scan_id"]), (1, 1, 1))
         self.assertEqual((handout["role"], handout["stage"]), (REVIEWER, "review"))
         self.assertTrue(handout["has_image"])
         self.assertTrue(handout["has_segmentation"])
         self.assertEqual(handout["segmentation_source"], "dataset")
-        self.assertEqual(handout["segmentation_labels"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
-        self.assertEqual([(label["name"], label["state"]) for label in handout["labels"]],
-                         [("FEMUR_LEFT", "pending"), ("FEMUR_RIGHT", "pending")])
+        self.assertEqual(handout["segmentation_labels"], {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "source"})
+        self.assertEqual(
+            [(label["name"], label["state"], label["origin"], label["reviewed"]) for label in handout["labels"]],
+            [("FEMUR_LEFT", "pending", "source", False), ("FEMUR_RIGHT", "pending", "source", False)],
+        )
         self.assertEqual(handout["history"], [])
-        self.assertEqual(handout["subject_info"]["subject_id"], 1)
-        self.assertEqual(handout["dataset_info"]["dataset_id"], 1)
+        self.assertEqual(handout["scan_info"]["modality"], "CT")
+        self.assertEqual(handout["subject_info"]["source_subject_id"], "case_1")
+        self.assertEqual(handout["dataset_info"]["name"], "Test dataset 1")
         self.assertTrue(handout["image_url"].endswith("/image"))
         self.assertTrue(handout["segmentation_url"].endswith("/segmentation"))
 
     def test_two_clients_are_given_different_subjects(self):
         self.assertNotEqual(
-            self.next_subject(self.alice_key)["subject_key"],
-            self.next_subject(self.bob_key)["subject_key"],
+            self.next_scan(self.alice_key)["scan_key"],
+            self.next_scan(self.bob_key)["scan_key"],
         )
 
     def test_the_image_downloads(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.client.get(handout["image_url"], headers=self.headers(self.alice_key))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, self.builder.image_file(1, 1).read_bytes())
 
     def test_the_segmentation_downloads_when_there_is_one(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.client.get(handout["segmentation_url"], headers=self.headers(self.alice_key))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, self.builder.segmentation_file(1, 1).read_bytes())
 
     def test_a_download_names_the_file_and_its_size(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.client.get(handout["image_url"], headers=self.headers(self.alice_key))
         image = self.builder.image_file(1, 1)
         self.assertEqual(response.headers["content-length"], str(image.stat().st_size))
         self.assertEqual(response.headers["content-disposition"], f'attachment; filename="{image.name}"')
 
     def test_a_file_larger_than_one_chunk_arrives_whole(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         with mock.patch.object(api, "DOWNLOAD_CHUNK_BYTES", 7):
             response = self.client.get(handout["image_url"], headers=self.headers(self.alice_key))
         self.assertEqual(response.content, self.builder.image_file(1, 1).read_bytes())
@@ -193,7 +198,7 @@ class HandoutTests(ApiTestCase):
     @unittest.skipUnless(hasattr(os, "posix_fadvise"), "read-ahead is turned off on Linux, where the server runs")
     def test_a_download_reads_the_share_without_read_ahead(self):
         """Read-ahead fills the one connection to the share, and every other user's request waits behind it."""
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         with mock.patch("os.posix_fadvise") as fadvise:
             response = self.client.get(handout["image_url"], headers=self.headers(self.alice_key))
         self.assertEqual(response.status_code, 200)
@@ -201,27 +206,27 @@ class HandoutTests(ApiTestCase):
         self.assertEqual(fadvise.call_args.args[3], os.POSIX_FADV_RANDOM)
 
     def test_one_client_cannot_download_another_clients_subject(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.client.get(handout["image_url"], headers=self.headers(self.bob_key))
         self.assertEqual(response.status_code, 403)
 
     def test_a_client_can_list_and_re_fetch_what_it_holds(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         listed = self.client.get("/api/v1/assignments", headers=self.headers(self.alice_key)).json()
         self.assertEqual([a["assignment_id"] for a in listed], [handout["assignment_id"]])
 
         again = self.client.get(
             f"/api/v1/assignments/{handout['assignment_id']}", headers=self.headers(self.alice_key)
         )
-        self.assertEqual(again.json()["subject_key"], handout["subject_key"])
+        self.assertEqual(again.json()["scan_key"], handout["scan_key"])
 
     def test_each_client_lists_only_what_it_was_handed(self):
-        self.next_subject(self.alice_key, REVIEWER)
+        self.next_scan(self.alice_key, REVIEWER)
         listed = self.client.get("/api/v1/assignments", headers=self.headers(self.alice_key, EDITOR)).json()
         self.assertEqual(listed, [])
 
     def test_extend_and_release_work_over_http(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         assignment_id = handout["assignment_id"]
         extended = self.client.post(f"/api/v1/assignments/{assignment_id}/extend", headers=self.headers(self.alice_key))
         self.assertEqual(extended.status_code, 200)
@@ -230,40 +235,40 @@ class HandoutTests(ApiTestCase):
             f"/api/v1/assignments/{assignment_id}/release", headers=self.headers(self.alice_key)
         )
         self.assertEqual(released.json()["state"], "released")
-        self.assertEqual(self.next_subject(self.bob_key)["subject_key"], handout["subject_key"])
+        self.assertEqual(self.next_scan(self.bob_key)["scan_key"], handout["scan_key"])
 
     def test_an_empty_queue_answers_404(self):
         for key in [self.alice_key, self.bob_key, self.create_client_user("carol")]:
-            self.next_subject(key)
-        response = self.client.post("/api/v1/subjects/next", headers=self.headers(self.create_client_user("dave")))
+            self.next_scan(key)
+        response = self.client.post("/api/v1/scans/next", headers=self.headers(self.create_client_user("dave")))
         self.assertEqual(response.status_code, 404)
         self.assertIn("review", response.json()["detail"])
 
     def test_an_editor_is_not_handed_a_subject_nobody_has_reviewed(self):
-        response = self.client.post("/api/v1/subjects/next", headers=self.headers(self.alice_key, EDITOR))
+        response = self.client.post("/api/v1/scans/next", headers=self.headers(self.alice_key, EDITOR))
         self.assertEqual(response.status_code, 404)
 
 
 class NoSegmentationHandoutTests(ApiTestCase):
-    """A subject without a segmentation goes straight to the editors."""
+    """A scan without a segmentation goes straight to the editors."""
 
     def prepare_dataset(self) -> None:
-        self.builder.add_subject(1, 1, segmentation=None)
+        self.builder.add_scan(1, 1, segmentation=None)
 
     def build_config(self):
         from qc_server.config import QCServerConfig
 
-        return QCServerConfig(include_subjects_without_segmentation=True)
+        return QCServerConfig(include_scans_without_segmentation=True)
 
     def test_the_handout_says_there_is_no_segmentation_to_fetch(self):
-        handout = self.next_subject(self.alice_key, EDITOR)
+        handout = self.next_scan(self.alice_key, EDITOR)
         self.assertEqual(handout["stage"], "edit")
         self.assertFalse(handout["has_segmentation"])
         self.assertIsNone(handout["segmentation_url"])
         self.assertIsNone(handout["segmentation_source"])
 
     def test_downloading_a_segmentation_that_does_not_exist_is_a_404(self):
-        handout = self.next_subject(self.alice_key, EDITOR)
+        handout = self.next_scan(self.alice_key, EDITOR)
         response = self.client.get(
             f"/api/v1/assignments/{handout['assignment_id']}/segmentation", headers=self.headers(self.alice_key, EDITOR)
         )
@@ -277,25 +282,25 @@ class ReviewOverHttpTests(ApiTestCase):
         self.assertEqual((body["state"], body["stage"]), ("submitted", "approval"))
         self.assertEqual(body["accepted_labels"], ["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.assertIn("approval", body["message"])
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.reviewed(self.store), set())
 
-        approved = self.client.post("/admin/api/cases/001_000001/approve", headers=self.admin_headers)
+        approved = self.client.post("/admin/api/cases/ds-0001/sub-000001/scan-01/approve", headers=self.admin_headers)
         self.assertEqual(approved.status_code, 200, approved.text)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(approved.json()["reviewed_labels"], ["FEMUR_LEFT", "FEMUR_RIGHT"])
+        self.assertEqual(self.reviewed(self.store), {"FEMUR_LEFT", "FEMUR_RIGHT"})
+        self.assertEqual(self.builder.origins(1, 1), {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "source"})
 
-    def test_a_rejected_subject_changes_nothing(self):
-        before = self.builder.all_subject_info(1)
-        before_bytes = self.builder.segmentation_file(1, 1).read_bytes()
+    def test_a_rejected_scan_changes_nothing(self):
+        before = self.dataset_state()
 
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.submit(self.alice_key, handout["assignment_id"], False, comment="wrong side")
         self.assertEqual(response.status_code, 200, response.text)
 
         body = response.json()
         self.assertEqual((body["state"], body["stage"]), ("submitted", "rejected"))
         self.assertEqual(body["rejected_labels"], [], "no label goes to the editors")
-        self.assertEqual(self.builder.all_subject_info(1), before)
-        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), before_bytes)
+        self.assertEqual(self.dataset_state(), before)
 
     def test_labels_are_judged_one_by_one(self):
         body = self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"], missing_labels=["TIBIA_LEFT"])
@@ -305,22 +310,22 @@ class ReviewOverHttpTests(ApiTestCase):
         self.assertEqual(body["stage"], "edit")
 
     def test_a_verdict_from_the_wrong_client_is_refused(self):
-        handout = self.next_subject(self.alice_key, REVIEWER)
+        handout = self.next_scan(self.alice_key, REVIEWER)
         response = self.submit(self.alice_key, handout["assignment_id"], False, role=EDITOR)
         self.assertEqual(response.status_code, 409)
         self.assertIn("review page", response.json()["detail"])
 
 
 class EditOverHttpTests(ApiTestCase):
-    """An editor's side, once a reviewer has rejected the right femur of subject 1."""
+    """An editor's side, once a reviewer has rejected the right femur of scan 1."""
 
     def setUp(self) -> None:
         super().setUp()
         self.judge(self.bob_key, rejected_labels=["FEMUR_RIGHT"], comment="head cut off")
-        self.handout = self.next_subject(self.alice_key, EDITOR)
+        self.handout = self.next_scan(self.alice_key, EDITOR)
 
     def test_the_editor_is_told_what_was_rejected_and_why(self):
-        self.assertEqual((self.handout["subject_key"], self.handout["stage"]), ("001_000001", "edit"))
+        self.assertEqual((self.handout["scan_key"], self.handout["stage"]), ("ds-0001/sub-000001/scan-01", "edit"))
         labels = {label["name"]: label for label in self.handout["labels"]}
         self.assertEqual((labels["FEMUR_RIGHT"]["state"], labels["FEMUR_RIGHT"]["painted"]), ("rejected", True))
         self.assertEqual(labels["FEMUR_LEFT"]["state"], "accepted")
@@ -335,15 +340,15 @@ class EditOverHttpTests(ApiTestCase):
         self.assertEqual(body["stage"], "review")
         self.assertEqual(body["edited_labels"], ["FEMUR_RIGHT", "TIBIA_LEFT"])
         self.assertEqual(self.dataset_state(), before)
-        staged = self.state_dir / "staged" / "Dataset_001" / "001_000001.seg.nrrd"
+        staged = self.state_dir / "staged" / "ds-0001" / "sub-000001" / "scan-01" / "segmentation.seg.nrrd"
         self.assertEqual(labels_in_mask(staged), {"FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"})
 
     def test_the_next_reviewer_downloads_the_correction(self):
         self.submit(self.alice_key, self.handout["assignment_id"], True, ["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])
-        handout = self.next_subject(self.bob_key, REVIEWER)
-        self.assertEqual((handout["subject_key"], handout["segmentation_source"]), ("001_000001", "staged"))
+        handout = self.next_scan(self.bob_key, REVIEWER)
+        self.assertEqual((handout["scan_key"], handout["segmentation_source"]), ("ds-0001/sub-000001/scan-01", "staged"))
         response = self.client.get(handout["segmentation_url"], headers=self.headers(self.bob_key))
-        staged = self.state_dir / "staged" / "Dataset_001" / "001_000001.seg.nrrd"
+        staged = self.state_dir / "staged" / "ds-0001" / "sub-000001" / "scan-01" / "segmentation.seg.nrrd"
         self.assertEqual(response.content, staged.read_bytes())
 
     def test_a_subset_of_labels_can_be_vouched_for(self):
@@ -369,7 +374,7 @@ class EditOverHttpTests(ApiTestCase):
             headers=self.headers(self.alice_key, EDITOR),
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(self.store.case_of("001_000001").stage, "edit")
+        self.assertEqual(self.store.case_of("ds-0001/sub-000001/scan-01").stage, "edit")
 
     def test_an_upload_over_the_size_cap_is_refused(self):
         self.store.config.max_upload_bytes = 64
@@ -383,7 +388,7 @@ class EditOverHttpTests(ApiTestCase):
 
 class SubmissionRequestTests(ApiTestCase):
     def test_malformed_metadata_is_a_400(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.client.post(
             f"/api/v1/assignments/{handout['assignment_id']}/submit",
             files={"metadata": (None, "not json at all")},
@@ -392,7 +397,7 @@ class SubmissionRequestTests(ApiTestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_metadata_missing_the_verdict_is_a_400(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.client.post(
             f"/api/v1/assignments/{handout['assignment_id']}/submit",
             files={"metadata": (None, json.dumps({"comment": "forgot the verdict"}))},
@@ -401,7 +406,7 @@ class SubmissionRequestTests(ApiTestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_one_client_cannot_submit_for_another(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_scan(self.alice_key)
         response = self.submit(self.bob_key, handout["assignment_id"], False)
         self.assertEqual(response.status_code, 403)
 
@@ -409,16 +414,16 @@ class SubmissionRequestTests(ApiTestCase):
 class FullRoundTripTests(ApiTestCase):
     """The whole journey: two reviewers, an editor in 3D Slicer, and the administrator."""
 
-    n_subjects = 2
+    n_scans = 2
 
     def test_two_subjects_from_first_review_to_the_dataset(self):
         carol_key = self.create_client_user("carol", roles=["editor"])
-        # alice rejects the right femur of subject 1; bob accepts subject 2 as it is.
+        # alice rejects the right femur of scan 1; bob accepts scan 2 as it is.
         self.judge(self.alice_key, rejected_labels=["FEMUR_RIGHT"], comment="head cut off")
         self.judge(self.bob_key)
 
-        # carol corrects subject 1 in 3D Slicer.
-        handout = self.next_subject(carol_key, EDITOR)
+        # carol corrects scan 1 in 3D Slicer.
+        handout = self.next_scan(carol_key, EDITOR)
         for url in (handout["image_url"], handout["segmentation_url"]):
             self.assertEqual(self.client.get(url, headers=self.headers(carol_key, EDITOR)).status_code, 200)
         response = self.submit(carol_key, handout["assignment_id"], True, ["FEMUR_LEFT", "FEMUR_RIGHT"])
@@ -428,13 +433,15 @@ class FullRoundTripTests(ApiTestCase):
         self.assertEqual(self.judge(self.bob_key)["stage"], "approval")
         stats = self.client.get("/admin/api/stats", headers=self.admin_headers).json()
         self.assertEqual(stats["awaiting_approval"], 2)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.reviewed(self.store), set())
 
-        # The administrator approves both, and only now does the dataset change.
+        # The administrator approves both, and only now are their labels reviewed. carol left the
+        # right femur as it was, so it keeps the origin it had.
         body = self.client.post("/admin/api/cases/approve", json={}, headers=self.admin_headers).json()
         self.assertEqual(body["approved"], 2)
         for subject_id in (1, 2):
-            self.assertEqual(self.builder.subject_info(1, subject_id)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+            self.assertEqual(self.reviewed(self.store, 1, subject_id), {"FEMUR_LEFT", "FEMUR_RIGHT"})
+            self.assertEqual(self.builder.origins(1, subject_id), {"FEMUR_LEFT": "source", "FEMUR_RIGHT": "source"})
         log = self.builder.dataset_log(1).read_text(encoding="utf-8")
         self.assertIn("corrected by 'carol'", log)
         stats = self.client.get("/admin/api/stats", headers=self.admin_headers).json()

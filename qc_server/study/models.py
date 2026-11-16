@@ -7,29 +7,29 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models import REVIEWER, DataAccess, HandoutLabel, HandoutSegment, Role
-from .schedule import normalized_subject_key
+from .schedule import normalized_scan_key
 
 #: ``draft`` while the settings can still change, ``running`` from Start, ``ended`` from End.
 StudyState = Literal["draft", "running", "ended"]
 
-#: How the study's subjects are chosen: a list the administrator types, or a random pick.
-SubjectMode = Literal["list", "random"]
+#: How the study's scans are chosen: a list the administrator types, or a random pick.
+ScanMode = Literal["list", "random"]
 
-#: A rater's verdict on one bone. Rejecting the subject as a whole rejects each of its bones.
+#: A rater's verdict on one bone. Rejecting the scan as a whole rejects each of its bones.
 Verdict = Literal["accept", "reject"]
 
 ACCEPT: Verdict = "accept"
 REJECT: Verdict = "reject"
 
-#: What the statistics count for each bone of a subject rejected as a whole. It is a verdict of
-#: its own, not a reject of each bone: a rejected bone can be corrected, a rejected subject is
+#: What the statistics count for each bone of a scan rejected as a whole. It is a verdict of
+#: its own, not a reject of each bone: a rejected bone can be corrected, a rejected scan is
 #: not used at all.
-SUBJECT_REJECTED = "subject_rejected"
+SCAN_REJECTED = "scan_rejected"
 
 #: The verdicts the statistics count, in the order they number them.
-VERDICTS: tuple[str, ...] = (ACCEPT, REJECT, SUBJECT_REJECTED)
+VERDICTS: tuple[str, ...] = (ACCEPT, REJECT, SCAN_REJECTED)
 
-#: The most readings of each subject a rater can be given.
+#: The most readings of each scan a rater can be given.
 MAX_READINGS_PER_RATER = 20
 
 #: Bounds of the number of bootstrap samples behind each confidence interval.
@@ -44,11 +44,12 @@ class StudySettings(BaseModel):
     """Everything the administrator decides before a study starts. Fixed from Start on."""
 
     name: str = Field(..., description="Names the study in the report")
-    subject_mode: SubjectMode = Field(..., description="'list': the subjects typed in; 'random': a random pick")
-    subject_keys: list[str] = Field(
-        default_factory=list, description="The study's subjects, as '<dataset>_<subject>' keys, for 'list'"
+    scan_mode: ScanMode = Field(..., description="'list': the scans typed in; 'random': a random pick")
+    scan_keys: list[str] = Field(
+        default_factory=list,
+        description="The study's scans, as keys such as 'ds-0027/sub-000001/scan-01' (or '27/1/1'), for 'list'",
     )
-    random_count: int | None = Field(None, ge=1, description="How many subjects a random pick takes")
+    random_count: int | None = Field(None, ge=1, description="How many scans a random pick takes")
     random_dataset_ids: list[int] | None = Field(
         None, description="The datasets a random pick takes them from; None means every dataset"
     )
@@ -58,24 +59,24 @@ class StudySettings(BaseModel):
         le=MAX_SEED,
         description="Fixes the random pick, the rater codes, each rater's order and the confidence intervals",
     )
-    raters: list[str] = Field(..., description="The names of the users who read the study's subjects")
+    raters: list[str] = Field(..., description="The names of the users who read the study's scans")
     readings_per_rater: int = Field(
-        2, ge=1, le=MAX_READINGS_PER_RATER, description="How many times each rater reads each subject"
+        2, ge=1, le=MAX_READINGS_PER_RATER, description="How many times each rater reads each scan"
     )
     min_gap: int | None = Field(
         None,
         ge=0,
         description=(
-            "At least this many other readings between a rater's two readings of one subject. None means half "
-            "the number of study subjects."
+            "At least this many other readings between a rater's two readings of one scan. None means half "
+            "the number of study scans."
         ),
     )
-    show_subject_id: bool = Field(False, description="Whether raters see which subject they are reading")
+    show_scan_id: bool = Field(False, description="Whether raters see which scan they are reading")
     bootstrap_samples: int = Field(
         2000,
         ge=MIN_BOOTSTRAP_SAMPLES,
         le=MAX_BOOTSTRAP_SAMPLES,
-        description="How many resamples of the subjects each 95% confidence interval is computed from",
+        description="How many resamples of the scans each 95% confidence interval is computed from",
     )
 
     model_config = ConfigDict(extra="forbid")
@@ -90,14 +91,15 @@ class StudySettings(BaseModel):
             raise ValueError("the study's name is at most 200 characters long")
         return name
 
-    @field_validator("subject_keys")
+    @field_validator("scan_keys")
     @classmethod
-    def _each_subject_once(cls, keys: list[str]) -> list[str]:
-        """Keys as the dataset writes them, '001_000012', however they were typed: '1_12' too."""
-        normalized = [normalized_subject_key(key) for key in keys]
+    def _each_scan_once(cls, keys: list[str]) -> list[str]:
+        """Keys as the database names the scans, 'ds-0027/sub-000012/scan-01', however they were
+        typed: '27/12/1' too."""
+        normalized = [normalized_scan_key(key) for key in keys]
         twice = sorted({key for key in normalized if normalized.count(key) > 1})
         if twice:
-            raise ValueError(f"these subjects are listed twice: {', '.join(twice)}")
+            raise ValueError(f"these scans are listed twice: {', '.join(twice)}")
         return sorted(normalized)
 
     @field_validator("random_dataset_ids")
@@ -117,20 +119,21 @@ class StudySettings(BaseModel):
         return sorted(names)
 
     @model_validator(mode="after")
-    def _subjects_given(self) -> "StudySettings":
-        if self.subject_mode == "list" and not self.subject_keys:
-            raise ValueError("list the study's subjects, or pick them at random")
-        if self.subject_mode == "random" and self.random_count is None:
-            raise ValueError("say how many subjects to pick at random")
+    def _scans_given(self) -> "StudySettings":
+        if self.scan_mode == "list" and not self.scan_keys:
+            raise ValueError("list the study's scans, or pick them at random")
+        if self.scan_mode == "random" and self.random_count is None:
+            raise ValueError("say how many scans to pick at random")
         return self
 
 
-class StudySubject(BaseModel):
-    """One subject of the study, and the bones in it that every reading judges."""
+class StudyScan(BaseModel):
+    """One scan of the study, and the bones in it that every reading judges."""
 
-    subject_key: str
+    scan_key: str
     dataset_id: int
     subject_id: int
+    scan_id: int
     bones: list[str] = Field(..., description="The labels of the study's copy of the segmentation, in label order")
     segmentation_sha256: str = Field(..., description="Of the study's copy of the segmentation")
 
@@ -141,7 +144,7 @@ class StudyRater(BaseModel):
     name: str
     code: str
     order: list[tuple[str, int]] = Field(
-        ..., description="(subject key, reading number of that subject), in the order the rater is given them"
+        ..., description="(scan key, reading number of that scan), in the order the rater is given them"
     )
 
 
@@ -156,7 +159,7 @@ class Study(BaseModel):
     started_at: str | None = None
     ended_at: str | None = None
     min_gap: int | None = Field(None, description="The gap the raters' lists keep, once started")
-    subjects: list[StudySubject] = Field(default_factory=list, description="Fixed at Start")
+    scans: list[StudyScan] = Field(default_factory=list, description="Fixed at Start")
     raters: list[StudyRater] = Field(default_factory=list, description="Fixed at Start")
 
     model_config = ConfigDict(extra="forbid")
@@ -164,8 +167,8 @@ class Study(BaseModel):
     def rater(self, name: str) -> StudyRater | None:
         return next((rater for rater in self.raters if rater.name == name), None)
 
-    def subject(self, subject_key: str) -> StudySubject | None:
-        return next((subject for subject in self.subjects if subject.subject_key == subject_key), None)
+    def scan(self, scan_key: str) -> StudyScan | None:
+        return next((scan for scan in self.scans if scan.scan_key == scan_key), None)
 
 
 class HeldReading(BaseModel):
@@ -180,19 +183,19 @@ class HeldReading(BaseModel):
 
 
 class Reading(BaseModel):
-    """A reading as it was submitted: a verdict on every bone of the subject. Rejecting the
-    subject as a whole rejects every bone, which the statistics count as ``subject_rejected``."""
+    """A reading as it was submitted: a verdict on every bone of the scan. Rejecting the
+    scan as a whole rejects every bone, which the statistics count as ``scan_rejected``."""
 
     assignment_id: str
     rater: str
     code: str
     position: int = Field(..., description="1-based, in the rater's list")
-    subject_key: str
-    reading: int = Field(..., description="Which reading of this subject by this rater: 1, 2, ...")
+    scan_key: str
+    reading: int = Field(..., description="Which reading of this scan by this rater: 1, 2, ...")
     handed_at: str
     submitted_at: str
     verdicts: dict[str, Verdict]
-    subject_rejected: bool = Field(False, description="The subject was rejected as a whole")
+    scan_rejected: bool = Field(False, description="The scan was rejected as a whole")
     comment: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -204,23 +207,24 @@ class ReadingInfo(BaseModel):
     code: str = Field(..., description="The rater's code, which stands for them in the results")
     position: int = Field(..., description="Which reading of the rater's list this is, from 1")
     total: int = Field(..., description="How many readings the rater's list holds")
-    title: str = Field(..., description="What the page calls the reading: the subject, or 'Reading n'")
-    show_subject_id: bool
+    title: str = Field(..., description="What the page calls the reading: the scan, or 'Reading n'")
+    show_scan_id: bool
 
 
 class StudyHandout(BaseModel):
-    """A reading as the review page receives it: the subject as if nobody had judged it yet.
+    """A reading as the review page receives it: the scan as if nobody had judged it yet.
 
     It has the fields of a quality check's handout that the review page reads, so the page
-    works unchanged, and ``study`` besides. There is no history and no earlier verdict, no
-    Subject_info entry (its label statuses say what was reviewed already), and, unless the
-    study shows it, nothing that names the subject.
+    works unchanged, and ``study`` besides. There is no history and no earlier verdict, nothing
+    of scan.json but the modality (the origins of its labels say which were corrected), and,
+    unless the study shows it, nothing that names the scan.
     """
 
     assignment_id: str
-    subject_key: str | None = Field(None, description="None unless the study shows the subject id")
+    scan_key: str | None = Field(None, description="None unless the study shows the scan id")
     dataset_id: int | None = None
     subject_id: int | None = None
+    scan_id: int | None = None
     expires_at: str | None = Field(None, description="Always None: a study reading has no lease time")
     role: Role = REVIEWER
     stage: Literal["review"] = "review"
@@ -228,14 +232,15 @@ class StudyHandout(BaseModel):
     has_image: bool
     has_segmentation: bool
     segmentation_source: Literal["dataset"] = "dataset"
-    segmentation_labels: dict[str, int] = Field(default_factory=dict)
+    segmentation_labels: dict[str, str] = Field(default_factory=dict)
     labels: list[HandoutLabel] = Field(default_factory=list, description="Every bone, none judged")
     requests: list = Field(default_factory=list)
     history: list = Field(default_factory=list)
     segments: list[HandoutSegment] = Field(default_factory=list)
     stored_segmentation_issue: str | None = None
+    scan_info: dict = Field(default_factory=dict, description="Only the modality")
     subject_info: dict = Field(default_factory=dict)
-    dataset_info: dict = Field(default_factory=dict, description="Only the modality unless the subject id is shown")
+    dataset_info: dict = Field(default_factory=dict, description="Empty unless the study shows the scan id")
     image_url: str | None = None
     segmentation_url: str | None = None
     study: ReadingInfo
@@ -247,7 +252,7 @@ class ReadingResult(BaseModel):
     assignment_id: str
     accepted_labels: list[str]
     rejected_labels: list[str]
-    subject_rejected: bool = False
+    scan_rejected: bool = False
     readings_done: int
     readings_total: int
     message: str
