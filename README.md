@@ -122,8 +122,8 @@ a correction.
 ### Steps
 
 ```bash
-git clone https://github.com/BoneHub/qc-server.git
-cd qc-server
+git clone https://github.com/BoneHub/Quality-Check-Server.git
+cd Quality-Check-Server
 cp .env.example .env                          # then edit .env: say where the database is
 docker compose up -d --build
 docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key # get the admin key if you have not already set in .env
