@@ -169,7 +169,7 @@ git pull && docker compose up -d --build
 The server keeps its admin key, its users and all work in progress.
 
 **Update the 3D Slicer extension at the same time.** The extension refuses to connect to a
-server of a different version (major.minor). If a new server version refuses to start on the
+server of another major version. If a new server version refuses to start on the
 state an older one left behind, start a
 [new server](#where-the-server-keeps-things).
 
