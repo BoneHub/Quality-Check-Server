@@ -1217,9 +1217,12 @@ through its `bonehub_format` package with the `[io]` extra:
   one, or none recorded) is skipped, with the reason in `server.log`. The server refuses to
   start if the installed `bonehub_format` is not of its own major version, 1.x, and on a state folder kept for
   BoneHub data schema 0.3.
-- **`bonehub_format` is installed from the source archive** of BoneHub-Format's main branch, not
-  with `git+https`: pip clones a git URL with its submodules, and the repository's converters
-  are a private submodule. The archive leaves it out, and the image needs no git.
+- **`bonehub_format` is pinned to a release.** It is installed from the source archive of
+  BoneHub-Format's tag `v1.0.0` (see `pyproject.toml`), so every install reads databases with
+  the same format, whatever reaches the format's main branch later; taking a newer release is a
+  change of tag. It is an archive rather than `git+https`: pip clones a git URL with its
+  submodules, and the repository's converters are a private submodule. The archive leaves it
+  out, and the image needs no git.
 
 ### Endpoints
 

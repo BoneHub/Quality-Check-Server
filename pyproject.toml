@@ -14,14 +14,16 @@ authors = [
 
 # The BoneHub format is taken from BoneHub-Format, with its [io] extra (numpy and SimpleITK)
 # for reading and writing .seg.nrrd segmentations; none of its converter stack is pulled in.
-# It is installed from the source archive of the repository's main branch rather than with
+# It is pinned to a release, the source archive of the format's tag v1.0.0, so that every
+# install of the server reads databases with the same format, whatever reaches the format's
+# main branch later; to take a newer release, change the tag. An archive rather than
 # git+https: pip clones a git URL with its submodules, and the repository's converters are a
 # private submodule, which an archive leaves out. The server's major version is the format's:
 # server 1.x reads format 1.x, and refuses to start with another (see config.WRITTEN_FOR_FORMAT),
 # so a new major version of the format takes a new major version of the server. matplotlib draws
 # the figures of a reliability study's report (qc_server.study.report).
 dependencies = [
-    "bonehub-format[io] @ https://github.com/BoneHub/BoneHub-Format/archive/refs/heads/main.zip",
+    "bonehub-format[io] @ https://github.com/BoneHub/BoneHub-Format/archive/refs/tags/v1.0.0.zip",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "python-multipart>=0.0.9",

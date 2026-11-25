@@ -66,7 +66,7 @@ STUDY_STATE_DIR_NAME = "state"
 
 #: The major version of the BoneHub format whose layout, scan.json and segmentation format this
 #: server implements: the server's own major version, so that server 1.x reads format 1.x. The
-#: format is installed from its repository's main branch; a minor version only adds what older
+#: format is pinned to one of its releases in pyproject.toml; a minor version only adds what older
 #: datasets still satisfy, but a new major version must stop the server rather than have its
 #: datasets read with this version's meaning -- until a server of that major version is released.
 WRITTEN_FOR_FORMAT = SERVER_VERSION.split(".")[0]
